@@ -14,14 +14,14 @@ using Amazon.S3.Model;
 using Amazon.Runtime;
 using ImageMagick;
 
-public static class ImageMakeTransparent
+public static class ImageToS3Func
 {
     // Client singleton and variables for S3
     static IAmazonS3 s3client;
     static readonly string s3bucket = "supermarketimages";
     static readonly RegionEndpoint region = RegionEndpoint.APSoutheast2;
 
-    [FunctionName("ImageTransparent")]
+    [FunctionName("ImageToS3")]
     public static async Task<IActionResult> Run(
 
     // Trigger off http GET requests
@@ -31,9 +31,10 @@ public static class ImageMakeTransparent
         // Get query parameters from http trigger
         string filename = req.Query["filename"];
         string url = req.Query["url"];
-        // string widthString = req.Query["width"];
-        // string heightString = req.Query["height"];
-        // string qualityString = req.Query["quality"];
+        int width = ParseIntWithRange(req.Query["width"], 16, 4096);
+        int height = ParseIntWithRange(req.Query["height"], 16, 4096);
+        int quality = ParseIntWithRange(req.Query["quality"], 5, 100);
+        int fuzz = ParseIntWithRange(req.Query["fuzz"], 0, 100);
 
         // If query parameters are not valid, return error Message
         if (filename == null || url == null || filename.Length < 3 || !url.Contains("http"))
@@ -58,7 +59,7 @@ public static class ImageMakeTransparent
 
 
         // Check S3 if file already exists, return if already exists
-        filename = Cleanfilename(filename);
+        filename = CleanFileName(filename);
         var existsResponse = await ImageAlreadyExistsOnS3(filename, log);
         if (existsResponse.Succeeded) return new OkObjectResult(existsResponse.Message);
 
@@ -72,20 +73,28 @@ public static class ImageMakeTransparent
 
 
         // Load stream into ImageMagick for conversion, return if unsuccessful
-        Stream outStream = new MemoryStream();
-        var imResponse = MakeImageTransparent(downloadResponse.bytePayload, outStream, log);
+        Stream thumbnailImageStream = new MemoryStream();
+        Stream fullSizeImageStream = new MemoryStream();
+        var imResponse = MakeImageTransparent(downloadResponse.bytePayload, fullSizeImageStream, thumbnailImageStream, log);
         if (imResponse.Succeeded)
             consolidatedMsg += imResponse.Message + "\n\n";
         else
             return new BadRequestObjectResult(imResponse.Message);
 
 
-        // Upload stream to S3, return final consolidated message, or unsuccessful upload msg
-        var s3Response = await UploadStreamToS3(filename, outStream, log);
-        if (s3Response.Succeeded)
-            return new OkObjectResult(consolidatedMsg + s3Response.Message);
+        // Upload thumbnail stream to S3, return if unsuccessful
+        var thumbnailResponse = await UploadStreamToS3(filename, thumbnailImageStream, log);
+        if (thumbnailResponse.Succeeded)
+            consolidatedMsg += thumbnailResponse.Message;
         else
-            return new BadRequestObjectResult(s3Response.Message);
+            return new BadRequestObjectResult(thumbnailResponse.Message);
+
+        // Upload full size image stream to S3, return final consolidated msg
+        var fullSizeResponse = await UploadStreamToS3("full/" + filename, fullSizeImageStream, log);
+        if (fullSizeResponse.Succeeded)
+            return new OkObjectResult(consolidatedMsg + fullSizeResponse.Message);
+        else
+            return new BadRequestObjectResult(fullSizeResponse.Message);
     }
 
     private static async Task<Response> DownloadImageUrlToStream(string url, ILogger log)
@@ -97,14 +106,14 @@ public static class ImageMakeTransparent
             byte[] downloadedBytes = await httpclient!.GetByteArrayAsync(url);
 
             // Log filename and dispose httpclient
-            log.LogWarning(ExtractfilenameFromUrl(url));
+            log.LogWarning(ExtractFileNameFromUrl(url));
             httpclient.Dispose();
 
             // Return Response with success, message, and byte[] payload
             return new Response(
                 true,
-                $"Original Image: {ExtractfilenameFromUrl(url)}\n" +
-                    $" File Size: {printFileSize(downloadedBytes.LongLength)}\n\n",
+                $"Original Image: {ExtractFileNameFromUrl(url)}\n" +
+                $"File Size: {printFileSize(downloadedBytes.LongLength)}\n\n",
                 downloadedBytes
             );
         }
@@ -155,18 +164,20 @@ public static class ImageMakeTransparent
 
     private static Response MakeImageTransparent(
         byte[] input,
-        Stream outStream,
+        Stream fullSizeImageStream,
+        Stream thumbnailImageStream,
         ILogger log,
         int width = 200,
         int height = 200,
-        int quality = 75)
+        int quality = 75,
+        int fuzzPercent = 3)
     {
         try
         {
             using (var image = new MagickImage(input))
             {
-                // Converts white pixels into transparent pixels with a fuzz of 3
-                image.ColorFuzz = new Percentage(3);
+                // Converts white pixels into transparent pixels with a default fuzz of 3
+                image.ColorFuzz = new Percentage(fuzzPercent);
                 image.Alpha(AlphaOption.Set);
                 image.BorderColor = MagickColors.White;
                 image.Border(1);
@@ -174,21 +185,31 @@ public static class ImageMakeTransparent
                 image.FloodFill(MagickColors.Transparent, 1, 1);
                 image.Shave(1, 1);
 
-                // Sets the output format to a default of 200x200 webp
-                image.Scale(width, height);
+                // Trim excess whitespace
+                image.Trim();
+                int originalWidth = image.Width;
+                int originalHeight = image.Height;
+
+                // Output full image to WebP format
                 image.Quality = quality;
                 image.Format = MagickFormat.WebP;
+                image.Write(fullSizeImageStream);
 
-                // Write the image to outStream
-                image.Write(outStream);
+                // Scale down and output thumbnail image
+                image.Scale(width, height);
+                image.Write(thumbnailImageStream);
 
                 // If image conversion is successful, log Message
-                long imageByteLength = outStream.Length;
-
                 return new Response(
                     true,
-                    "Converted to Transparent WebP with Dimensions: " +
-                    $"{width}x{height} \nFile Size: {printFileSize(imageByteLength)}"
+                    "Successfully Converted to Transparent WebP\n\n" +
+                    $"New Dimensions: {originalWidth}x{originalHeight}\n" +
+                    $"New File Size: {printFileSize(fullSizeImageStream.Length)}\n\n" +
+                    $"Thumbnail Dimensions: {width}x{height}\n" +
+                    $"Thumbnail File Size: {printFileSize(thumbnailImageStream.Length)}\n\n" +
+                    $"ImageMagick Variables Used:\n" +
+                    $"Transparent Fuzz {fuzzPercent}%\n" +
+                    $"Quality {quality}%\n"
                 );
             }
         }
@@ -200,7 +221,7 @@ public static class ImageMakeTransparent
     }
 
     // Try to extract a filename from a url, returns back the full url if unsuccessful
-    private static string ExtractfilenameFromUrl(string url)
+    private static string ExtractFileNameFromUrl(string url)
     {
         try
         {
@@ -218,27 +239,24 @@ public static class ImageMakeTransparent
         }
     }
 
-    private static void ValidateHeightWidth(string dimensionString)
+    // Parses a string of a number that should be within min - max range
+    //  returns -1 if unsuccessful
+    private static int ParseIntWithRange(string numString, int min, int max)
     {
-        // if (dimensionString == null || dimensionString == "") return 0;
-
-        // try
-        // {
-        //     int dimension = int.Parse(dimensionString);
-        //     if (dimension < 20 || dimension > 4000) 
-        //         throw new Exception();
-
-        //     return dimension;
-        // }
-        // catch (System.Exception)
-        // {
-
-        //     return 0;
-        // }
+        try
+        {
+            int num = int.Parse(numString);
+            if (num < min || num > max)
+                throw new Exception();
+            return num;
+        }
+        catch (System.Exception)
+        {
+            return -1;
+        }
     }
 
-
-    private static string Cleanfilename(string filename)
+    private static string CleanFileName(string filename)
     {
         // If filename contains a .extension other than webp, replace it with webp
         if (filename.Contains('.') && !filename.ToLower().EndsWith(".webp"))
@@ -274,8 +292,8 @@ public static class ImageMakeTransparent
                 // Clean up stream
                 stream.Dispose();
 
-                return new Response(true, "Uploaded to S3 successfully:\n\n" +
-                $"https://{s3bucket}.s3.ap-southeast-2.amazonaws.com/{filename}\n");
+                return new Response(true, "Uploaded to S3:\n\n" +
+                $"https://{s3bucket}.s3.ap-southeast-2.amazonaws.com/{filename}\n\n");
             }
             else
             {
@@ -318,7 +336,6 @@ public static class ImageMakeTransparent
         {
             if (e.Message.StartsWith("The specified key does not exist."))
             {
-                log.LogWarning("Key doesn't yet exist:" + filename + "\n" + e.Message);
                 return new Response(false);
             }
             else
