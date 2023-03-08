@@ -21,7 +21,7 @@ public static class ImageMakeTransparent
     static readonly string s3bucket = "supermarketimages";
     static readonly RegionEndpoint region = RegionEndpoint.APSoutheast2;
 
-    [FunctionName("ImageMakeTransparentTrigger")]
+    [FunctionName("ImageTransparent")]
     public static async Task<IActionResult> Run(
 
     // Trigger off http GET requests
@@ -29,18 +29,18 @@ public static class ImageMakeTransparent
     ILogger log)
     {
         // Get query parameters from http trigger
-        string fileName = req.Query["fileName"];
+        string filename = req.Query["filename"];
         string url = req.Query["url"];
         // string widthString = req.Query["width"];
         // string heightString = req.Query["height"];
         // string qualityString = req.Query["quality"];
 
         // If query parameters are not valid, return error Message
-        if (fileName == null || url == null || fileName.Length < 3 || !url.Contains("http"))
+        if (filename == null || url == null || filename.Length < 3 || !url.Contains("http"))
         {
             return new OkObjectResult(
-                "This function requires 'fileName' and 'url' query parameters\n " +
-                "example: /HttpImageTrigger?fileName=12345&url=http://domain.com/filename.jpg"
+                "This function requires 'filename' and 'url' query parameters \nExample:\n\n" +
+                "/ImageTransparent?filename=new-file-on-s3&url=http://domain.com/heavy-image.png"
             );
         }
 
@@ -58,8 +58,8 @@ public static class ImageMakeTransparent
 
 
         // Check S3 if file already exists, return if already exists
-        fileName = CleanFileName(fileName);
-        var existsResponse = await ImageAlreadyExistsOnS3(fileName, log);
+        filename = Cleanfilename(filename);
+        var existsResponse = await ImageAlreadyExistsOnS3(filename, log);
         if (existsResponse.Succeeded) return new OkObjectResult(existsResponse.Message);
 
 
@@ -81,7 +81,7 @@ public static class ImageMakeTransparent
 
 
         // Upload stream to S3, return final consolidated message, or unsuccessful upload msg
-        var s3Response = await UploadStreamToS3(fileName, outStream, log);
+        var s3Response = await UploadStreamToS3(filename, outStream, log);
         if (s3Response.Succeeded)
             return new OkObjectResult(consolidatedMsg + s3Response.Message);
         else
@@ -97,14 +97,14 @@ public static class ImageMakeTransparent
             byte[] downloadedBytes = await httpclient!.GetByteArrayAsync(url);
 
             // Log filename and dispose httpclient
-            log.LogWarning(ExtractFileNameFromUrl(url));
+            log.LogWarning(ExtractfilenameFromUrl(url));
             httpclient.Dispose();
 
             // Return Response with success, message, and byte[] payload
             return new Response(
                 true,
-                $"Original Image: {ExtractFileNameFromUrl(url)}\n" +
-                    $"Size: {printFileSize(downloadedBytes.LongLength)}\n\n",
+                $"Original Image: {ExtractfilenameFromUrl(url)}\n" +
+                    $" File Size: {printFileSize(downloadedBytes.LongLength)}\n\n",
                 downloadedBytes
             );
         }
@@ -112,7 +112,7 @@ public static class ImageMakeTransparent
         {
             return new Response(
                 false,
-                url + " was unable to be downloaded" + e.ToString()
+                "Unable to be download:\n\n" + url + "\n\n" + e.Message
             );
         }
     }
@@ -145,10 +145,10 @@ public static class ImageMakeTransparent
             }
             return new Response(
                 false,
-                "Unable to connect to S3. Check credentials were set as environment settings:\n" +
-                "\"AWS_ACCESS_KEY\": \"<your aws access key>\",\n" +
-                "\"AWS_SECRET_KEY\": \"<your aws secret key>\"\n" +
-                e.Message + "\n" + e.ToString()
+                "Unable to connect to S3. Check Azure Function > Configuration > " +
+                "Application Settings were set:\n" +
+                "AWS_ACCESS_KEY: <your aws access key>\n" +
+                "AWS_SECRET_KEY: <your aws secret key>\n\n" + e.Message
             );
         }
     }
@@ -187,20 +187,20 @@ public static class ImageMakeTransparent
 
                 return new Response(
                     true,
-                    "Converted to Transparent Image with dimensions: " +
-                    $"{width}x{height} \nSize: {printFileSize(imageByteLength)}"
+                    "Converted to Transparent WebP with Dimensions: " +
+                    $"{width}x{height} \nFile Size: {printFileSize(imageByteLength)}"
                 );
             }
         }
         catch (System.Exception e)
         {
-            log.LogError(e.ToString());
+            log.LogError(e.Message);
             return new Response(false, "Unable to be processed by ImageMagick");
         }
     }
 
     // Try to extract a filename from a url, returns back the full url if unsuccessful
-    private static string ExtractFileNameFromUrl(string url)
+    private static string ExtractfilenameFromUrl(string url)
     {
         try
         {
@@ -238,24 +238,24 @@ public static class ImageMakeTransparent
     }
 
 
-    private static string CleanFileName(string fileName)
+    private static string Cleanfilename(string filename)
     {
-        // If fileName contains a .extension other than webp, replace it with webp
-        if (fileName.Contains('.') && !fileName.ToLower().EndsWith(".webp"))
+        // If filename contains a .extension other than webp, replace it with webp
+        if (filename.Contains('.') && !filename.ToLower().EndsWith(".webp"))
         {
-            string[] splitFileName = fileName.Split('.');
-            string originalExtension = splitFileName[splitFileName.Length - 1].ToLower();
-            fileName = fileName.Replace(originalExtension, "webp");
+            string[] splitfilename = filename.Split('.');
+            string originalExtension = splitfilename[splitfilename.Length - 1].ToLower();
+            filename = filename.Replace(originalExtension, "webp");
         }
         else
         {
-            // If fileName has no .extension, add .webp
-            fileName = fileName += ".webp";
+            // If filename has no .extension, add .webp
+            filename = filename += ".webp";
         }
-        return fileName;
+        return filename;
     }
 
-    private static async Task<Response> UploadStreamToS3(string fileName, Stream stream, ILogger log)
+    private static async Task<Response> UploadStreamToS3(string filename, Stream stream, ILogger log)
     {
         try
         {
@@ -263,7 +263,7 @@ public static class ImageMakeTransparent
             var putRequest = new PutObjectRequest
             {
                 BucketName = s3bucket,
-                Key = fileName,
+                Key = filename,
                 InputStream = stream
             };
 
@@ -275,12 +275,12 @@ public static class ImageMakeTransparent
                 stream.Dispose();
 
                 return new Response(true, "Uploaded to S3 successfully:\n\n" +
-                $"https://{s3bucket}.s3.ap-southeast-2.amazonaws.com/{fileName}\n");
+                $"https://{s3bucket}.s3.ap-southeast-2.amazonaws.com/{filename}\n");
             }
             else
             {
                 log.LogError(response.HttpStatusCode.ToString());
-                return new Response(false, fileName + " was unable to be uploaded to S3");
+                return new Response(false, filename + " was unable to be uploaded to S3");
             }
         }
         catch (AmazonS3Exception e)
@@ -296,14 +296,14 @@ public static class ImageMakeTransparent
     }
 
     // Check if image already exists on S3, returns true if exists
-    public static async Task<Response> ImageAlreadyExistsOnS3(string fileName, ILogger log)
+    public static async Task<Response> ImageAlreadyExistsOnS3(string filename, ILogger log)
     {
         try
         {
-            var response = await s3client!.GetObjectAsync(bucketName: s3bucket, key: fileName);
+            var response = await s3client!.GetObjectAsync(bucketName: s3bucket, key: filename);
             if (response.HttpStatusCode == HttpStatusCode.OK)
             {
-                string msg = fileName + " already exists on S3 bucket";
+                string msg = filename + " already exists on S3 bucket";
                 log.LogInformation(msg);
                 return new Response(true, msg);
             }
@@ -318,7 +318,7 @@ public static class ImageMakeTransparent
         {
             if (e.Message.StartsWith("The specified key does not exist."))
             {
-                log.LogWarning("Key doesn't yet exist:" + fileName + "\n" + e.Message);
+                log.LogWarning("Key doesn't yet exist:" + filename + "\n" + e.Message);
                 return new Response(false);
             }
             else
