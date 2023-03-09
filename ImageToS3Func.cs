@@ -41,12 +41,9 @@ public static class ImageToS3Func
         {
             return new OkObjectResult(
                 "This function requires 'filename' and 'url' query parameters \nExample:\n\n" +
-                "/ImageTransparent?filename=new-file-on-s3&url=http://domain.com/heavy-image.png"
+                "/ImageToS3?filename=new-file-on-s3&url=http://domain.com/heavy-image.png"
             );
         }
-
-        // Todo: handle width, height, quality queries
-        // ValidateHeightWidth();
 
         // Build a consolidated message string, which will be added to with other functions
         string consolidatedMsg = "";
@@ -85,7 +82,7 @@ public static class ImageToS3Func
         // Upload thumbnail stream to S3, return if unsuccessful
         var thumbnailResponse = await UploadStreamToS3(filename, thumbnailImageStream, log);
         if (thumbnailResponse.Succeeded)
-            consolidatedMsg += thumbnailResponse.Message;
+            consolidatedMsg += "Uploaded to S3:\n\n" + thumbnailResponse.Message;
         else
             return new BadRequestObjectResult(thumbnailResponse.Message);
 
@@ -292,8 +289,10 @@ public static class ImageToS3Func
                 // Clean up stream
                 stream.Dispose();
 
-                return new Response(true, "Uploaded to S3:\n\n" +
-                $"https://{s3bucket}.s3.ap-southeast-2.amazonaws.com/{filename}\n\n");
+                return new Response(
+                    true,
+                    $"https://{s3bucket}.s3.ap-southeast-2.amazonaws.com/{filename}\n"
+                );
             }
             else
             {
