@@ -1,8 +1,10 @@
 # Image Transparent to S3 Func
 
-This is an Azure Serverless Function that takes a url of an opaque image, converts it into a transparent webp image format, and then stores the result in an AWS S3 bucket.
+This is an Azure Serverless Function that takes urls of opaque images with white backgrounds, converts them into a transparent webp image format, and then stores the result in an AWS S3 bucket.
 
-It runs using simple GET requests with exposed query parameters, and is served from `https://<func-app-name>.azurewebsites.net/api/ImageToS3?`
+It runs using simple GET requests with exposed query parameters, and is served from:
+
+`https://<func-app-name>.azurewebsites.net/api/ImageToS3?`
 
 The function runs on a mix of Azure and AWS.
 Azure Functions is used for its ease-of-use over Lambda, and images are stored on AWS S3 over Azure Storage for its better pricing structure.
@@ -33,39 +35,55 @@ If deploying to a hosted Azure Function, set the Application Settings for `AWS_A
 
 ## Usage
 
-The function is triggered by http GET requests with query parameters. It requires `code`, `filename` and `url` query parameters to be set.
+The function is triggered by http GET requests with query parameters. It requires `code`, `destination` and `source` query parameters to be set.
+
+Optional `width` (default 200), `quality` (default 75), `fuzz` (default 3) parameters can also be set.
 
 - `code` is the function level authorisation key, which can be obtained from the Azure Function > App keys section. This is not needed for local testing.
-- `filename` represents the filename to be saved in S3. Any .extension will be replaced with the .webp format.
-- `url` must be a valid image url.
+- `destination` represents the s3 path and filename to be saved to. Any .extension will be replaced with the .webp format.
+- `source` must be a valid image url.
 
-Example Usage:
+Example:
+
+- `code=asdf1234==`
+- `destination=s3://my-bucket/test/light-image.webp`
+- `source=http://domain.com/heavy-image.png`
 
 ```html
-https://<func-app>.azurewebsites.net/api/ImageToS3?code=<func-key>&filename=lightweight&url=http://domain.com/heavy-image.png
+ImageToS3?code=asdf1234==&filename=s3://my-bucket/test/light-image.webp&url=http://domain.com/heavy-image.png
 ```
 
-Output:
+## Output Response
 
 ```cmd
-Original Image: heavy-image.png
-File Size: 532 KB
+ImageToS3 v1.1 - powered by Azure Functions, AWS S3, and ImageMagick
+--------------------------------------------------------------------
 
-Successfully Converted to Transparent WebP
+      Source: https://domain.com/img/heavy-image.png
+ Destination: s3://my-bucket/test/light-image.webp
+   Thumbnail: s3://my-bucket/test/200/light-image.webp
 
-New Dimensions: 800x800
-New File Size: 24 KB
+  Downloaded File In: 3.83s
+    Source File Size: 136 KB
+   Source Dimensions: 1920 x 1080
 
-Thumbnail Dimensions: 200x200
-Thumbnail File Size: 6 KB
+ImageMagick Conversion - Took 0.96s
+------------------------------------
+       New WebP Size: 37 KB
+        WebP Quality: 75%
+   Transparency Fuzz: 3%
 
-ImageMagick Variables Used:
-Transparent Fuzz 3%
-Quality 75%
+Thumbnail Dimensions: 200 x 200
+ Thumbnail File Size: 3 KB
 
-Uploaded to S3:
+S3 Upload of Full-Size and Thumbnail WebPs:
+-------------------------------------------
+https://my-bucket.s3.my-region.amazonaws.com/test/light-image.webp
+https://my-bucket.s3.my-region.amazonaws.com/test/200/light-image.webp
 
-https://<bucket>.s3.<region>.amazonaws.com/lightweight.webp
-https://<bucket>.s3.<region>.amazonaws.com/full/lightweight.webp
-
+S3 Upload Took 0.4s
 ```
+
+## Output Images
+
+![alt text](https://github.com/Jason-nzd/ImageToS3Func/raw/master/image-comparison-1000.jpg?raw=true "Image Comparison")
