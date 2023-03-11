@@ -16,10 +16,12 @@ using ImageMagick;
 
 public static class ImageToS3Func
 {
-    // Client singleton and variables for S3
-    static IAmazonS3 s3client;
-    static readonly string s3bucket = "supermarketimages";
+    // Singletons and variables for S3 and logging
     static readonly RegionEndpoint region = RegionEndpoint.APSoutheast2;
+    static IAmazonS3 s3client;
+    static string s3bucket;
+    static int thumbWidth;
+    static DateTime startTime;
 
     [FunctionName("ImageToS3")]
     public static async Task<IActionResult> Run(
@@ -28,70 +30,121 @@ public static class ImageToS3Func
     [HttpTrigger(AuthorizationLevel.Function, "get", Route = null)] HttpRequest req,
     ILogger log)
     {
+        // Store start time for logging function duration
+        startTime = DateTime.Now;
+
         // Get query parameters from http trigger
-        string filename = req.Query["filename"];
-        string url = req.Query["url"];
-        int width = ParseIntWithRange(req.Query["width"], 16, 4096);
-        int height = ParseIntWithRange(req.Query["height"], 16, 4096);
-        int quality = ParseIntWithRange(req.Query["quality"], 5, 100);
-        int fuzz = ParseIntWithRange(req.Query["fuzz"], 0, 100);
+        string destination = req.Query["destination"];
+        string source = req.Query["source"];
+
+        // Try parse integers from query parameters
+        // ParseIntWithRange() will return -1 if invalid, out of specified range, or missing
+        thumbWidth = ParseIntWithRange(req.Query["width"], min: 16, max: 4096);
+        int quality = ParseIntWithRange(req.Query["quality"], min: 5, max: 100);
+        int fuzz = ParseIntWithRange(req.Query["fuzz"], min: 0, max: 100);
+
+        // Set integers to defaults if unable to be parsed
+        thumbWidth = thumbWidth > 0 ? thumbWidth : 200;
+        quality = quality > 0 ? quality : 75;
+        fuzz = fuzz > 0 ? fuzz : 3;
+
+        // Build a consolidated message string, which will be added to with all other functions
+        string consolidatedMsg = "ImageToS3 v1.1 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        consolidatedMsg += "".PadRight(68, '-') + "\n\n";
 
         // If query parameters are not valid, return error Message
-        if (filename == null || url == null || filename.Length < 3 || !url.Contains("http"))
+        if (destination == null || source == null || !destination.Contains("s3://") || !source.Contains("http"))
         {
-            return new OkObjectResult(
-                "This function requires 'filename' and 'url' query parameters \nExample:\n\n" +
-                "/ImageToS3?filename=new-file-on-s3&url=http://domain.com/heavy-image.png"
+            return new OkObjectResult(consolidatedMsg +
+                "This function requires 'destination' and 'source' query parameters \nExample:\n\n" +
+                "/ImageToS3?destination=s3://mybucket/path/new-file&source=https://domain.com/heavy-image.png\n\n" +
+                "Optional 'width' (default 200), 'quality' (default 75), 'fuzz' (default 3)" +
+                " parameters can also be set"
             );
         }
 
-        // Build a consolidated message string, which will be added to with other functions
-        string consolidatedMsg = "";
+        // Split s3 destination string into array of strings
+        // Example: s3://mybucket/optional/path/filetosave.webp
+        // Results: [s3:, , mybucket, optional, path, filetosave.webp]
+        string[] destinationChunks = destination.Split('/');
+
+        // Get bucket name from the 2nd index
+        s3bucket = destinationChunks[2]; ;
+
+        // Get optional path string from 3rd to the 2nd to last index
+        string s3path = "";
+        if (destinationChunks.Length > 4)
+        {
+            for (int i = 3; i < destinationChunks.Length - 1; i++)
+            {
+                s3path += destinationChunks[i] + "/";
+            }
+        }
+
+        // Get filename from last index
+        string filename = destinationChunks[destinationChunks.Length - 1];
+        filename = CleanFileName(filename);     // clean and parse filename into .webp extension
+
+        // Add info to consolidatedMsg
+        consolidatedMsg += $"      Source: {source}\n";
+        consolidatedMsg += $" Destination: s3://{s3bucket}/{s3path}{filename}\n";
+        consolidatedMsg += $"   Thumbnail: s3://{s3bucket}/{s3path}{thumbWidth}/{filename}\n\n";
 
 
         // Establish connection to S3, return if unable to connect
         var connectResponse = await ConnectToS3();
         if (!connectResponse.Succeeded)
-            return new BadRequestObjectResult(connectResponse.Message);
+            return new BadRequestObjectResult(consolidatedMsg + connectResponse.Message);
 
 
         // Check S3 if file already exists, return if already exists
-        filename = CleanFileName(filename);
-        var existsResponse = await ImageAlreadyExistsOnS3(filename, log);
-        if (existsResponse.Succeeded) return new OkObjectResult(existsResponse.Message);
+        var existsResponse = await ImageAlreadyExistsOnS3(s3path + filename, log);
+        consolidatedMsg += existsResponse.Message;
+        if (existsResponse.Succeeded)
+            return new OkObjectResult(consolidatedMsg);
 
 
         // Download from url, return if unsuccessful
-        var downloadResponse = await DownloadImageUrlToStream(url, log);
-        if (downloadResponse.Succeeded)
-            consolidatedMsg += downloadResponse.Message;
-        else
-            return new BadRequestObjectResult(downloadResponse.Message);
+        var downloadResponse = await DownloadImageUrlToStream(source, log);
+        consolidatedMsg += downloadResponse.Message;
+        if (!downloadResponse.Succeeded)
+            return new BadRequestObjectResult(consolidatedMsg);
 
 
         // Load stream into ImageMagick for conversion, return if unsuccessful
         Stream thumbnailImageStream = new MemoryStream();
         Stream fullSizeImageStream = new MemoryStream();
-        var imResponse = MakeImageTransparent(downloadResponse.bytePayload, fullSizeImageStream, thumbnailImageStream, log);
-        if (imResponse.Succeeded)
-            consolidatedMsg += imResponse.Message + "\n\n";
-        else
-            return new BadRequestObjectResult(imResponse.Message);
+        var imResponse = MakeImageTransparent(
+            downloadResponse.bytePayload,
+            fullSizeImageStream,
+            thumbnailImageStream,
+            log,
+            quality,
+            fuzz
+        );
+        consolidatedMsg += imResponse.Message;
+        if (!imResponse.Succeeded)
+            return new BadRequestObjectResult(consolidatedMsg);
 
 
         // Upload thumbnail stream to S3, return if unsuccessful
-        var thumbnailResponse = await UploadStreamToS3(filename, thumbnailImageStream, log);
-        if (thumbnailResponse.Succeeded)
-            consolidatedMsg += "Uploaded to S3:\n\n" + thumbnailResponse.Message;
-        else
-            return new BadRequestObjectResult(thumbnailResponse.Message);
+        consolidatedMsg += "S3 Upload of Full-Size and Thumbnail WebPs:\n" + "".PadRight(43, '-') + "\n";
+        var thumbnailResponse = await UploadStreamToS3(s3path + thumbWidth.ToString() + "/" + filename, thumbnailImageStream, log);
+        consolidatedMsg += thumbnailResponse.Message;
+        if (!thumbnailResponse.Succeeded)
+            return new BadRequestObjectResult(consolidatedMsg);
+
 
         // Upload full size image stream to S3, return final consolidated msg
-        var fullSizeResponse = await UploadStreamToS3("full/" + filename, fullSizeImageStream, log);
+        var fullSizeResponse = await UploadStreamToS3(s3path + filename, fullSizeImageStream, log);
+
+        double timeElapsed = Math.Round((DateTime.Now - startTime).TotalSeconds, 2);
+        consolidatedMsg += fullSizeResponse.Message + $"\nS3 Upload Took {timeElapsed}s";
+
         if (fullSizeResponse.Succeeded)
-            return new OkObjectResult(consolidatedMsg + fullSizeResponse.Message);
+            return new OkObjectResult(consolidatedMsg);
         else
-            return new BadRequestObjectResult(fullSizeResponse.Message);
+            return new BadRequestObjectResult(consolidatedMsg);
     }
 
     private static async Task<Response> DownloadImageUrlToStream(string url, ILogger log)
@@ -106,11 +159,15 @@ public static class ImageToS3Func
             log.LogWarning(ExtractFileNameFromUrl(url));
             httpclient.Dispose();
 
+            // Measure time elapsed
+            double timeElapsed = Math.Round((DateTime.Now - startTime).TotalSeconds, 2);
+            startTime = DateTime.Now;   // reset startTime for later section time measures
+
             // Return Response with success, message, and byte[] payload
             return new Response(
                 true,
-                $"Original Image: {ExtractFileNameFromUrl(url)}\n" +
-                $"File Size: {printFileSize(downloadedBytes.LongLength)}\n\n",
+                $"  Downloaded File In: {timeElapsed}s\n" +
+                $"    Source File Size: {printFileSize(downloadedBytes.LongLength)}\n",
                 downloadedBytes
             );
         }
@@ -118,7 +175,7 @@ public static class ImageToS3Func
         {
             return new Response(
                 false,
-                "Unable to be download:\n\n" + url + "\n\n" + e.Message
+                "Error: Unable to download:\n\n" + url + "\n\n" + e.Message
             );
         }
     }
@@ -151,10 +208,10 @@ public static class ImageToS3Func
             }
             return new Response(
                 false,
-                "Unable to connect to S3. Check Azure Function > Configuration > " +
+                "Error: Unable to connect to S3. \n\nCheck Azure Function > Configuration > " +
                 "Application Settings were set:\n" +
                 "AWS_ACCESS_KEY: <your aws access key>\n" +
-                "AWS_SECRET_KEY: <your aws secret key>\n\n" + e.Message
+                "AWS_SECRET_KEY: <your aws secret key>\n\n"
             );
         }
     }
@@ -164,17 +221,19 @@ public static class ImageToS3Func
         Stream fullSizeImageStream,
         Stream thumbnailImageStream,
         ILogger log,
-        int width = 200,
-        int height = 200,
-        int quality = 75,
-        int fuzzPercent = 3)
+        int quality,
+        int fuzz
+    )
     {
         try
         {
             using (var image = new MagickImage(input))
             {
+                int originalWidth = image.Width;
+                int originalHeight = image.Height;
+
                 // Converts white pixels into transparent pixels with a default fuzz of 3
-                image.ColorFuzz = new Percentage(fuzzPercent);
+                image.ColorFuzz = new Percentage(fuzz);
                 image.Alpha(AlphaOption.Set);
                 image.BorderColor = MagickColors.White;
                 image.Border(1);
@@ -183,9 +242,7 @@ public static class ImageToS3Func
                 image.Shave(1, 1);
 
                 // Trim excess whitespace
-                image.Trim();
-                int originalWidth = image.Width;
-                int originalHeight = image.Height;
+                // image.Trim();
 
                 // Output full image to WebP format
                 image.Quality = quality;
@@ -193,27 +250,30 @@ public static class ImageToS3Func
                 image.Write(fullSizeImageStream);
 
                 // Scale down and output thumbnail image
-                image.Scale(width, height);
+                image.Scale(thumbWidth, thumbWidth);
                 image.Write(thumbnailImageStream);
+
+                // Measure time elapsed
+                double timeElapsed = Math.Round((DateTime.Now - startTime).TotalSeconds, 2);
+                startTime = DateTime.Now;   // reset startTime for later section time measures
 
                 // If image conversion is successful, log Message
                 return new Response(
                     true,
-                    "Successfully Converted to Transparent WebP\n\n" +
-                    $"New Dimensions: {originalWidth}x{originalHeight}\n" +
-                    $"New File Size: {printFileSize(fullSizeImageStream.Length)}\n\n" +
-                    $"Thumbnail Dimensions: {width}x{height}\n" +
-                    $"Thumbnail File Size: {printFileSize(thumbnailImageStream.Length)}\n\n" +
-                    $"ImageMagick Variables Used:\n" +
-                    $"Transparent Fuzz {fuzzPercent}%\n" +
-                    $"Quality {quality}%\n"
+                    $"   Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
+                    $"ImageMagick Conversion - Took {timeElapsed}s\n" + "".PadRight(36, '-') + "\n" +
+                    $"       New File Size: {printFileSize(fullSizeImageStream.Length)}\n" +
+                    $"        WebP Quality: {quality}%\n" +
+                    $"   Transparency Fuzz: {fuzz}%\n\n" +
+                    $"Thumbnail Dimensions: {thumbWidth} x {thumbWidth}\n" +
+                    $" Thumbnail File Size: {printFileSize(thumbnailImageStream.Length)}\n\n"
                 );
             }
         }
         catch (System.Exception e)
         {
             log.LogError(e.Message);
-            return new Response(false, "Unable to be processed by ImageMagick");
+            return new Response(false, "\nImage unable to be processed by ImageMagick - Check it is a valid image url");
         }
     }
 
@@ -255,8 +315,8 @@ public static class ImageToS3Func
 
     private static string CleanFileName(string filename)
     {
-        // If filename contains a .extension other than webp, replace it with webp
-        if (filename.Contains('.') && !filename.ToLower().EndsWith(".webp"))
+        // If filename contains a .extension, replace it with webp
+        if (filename.Contains('.'))
         {
             string[] splitfilename = filename.Split('.');
             string originalExtension = splitfilename[splitfilename.Length - 1].ToLower();
@@ -270,7 +330,10 @@ public static class ImageToS3Func
         return filename;
     }
 
-    private static async Task<Response> UploadStreamToS3(string filename, Stream stream, ILogger log)
+    private static async Task<Response> UploadStreamToS3(
+        string fileKey,
+        Stream stream,
+        ILogger log)
     {
         try
         {
@@ -278,7 +341,7 @@ public static class ImageToS3Func
             var putRequest = new PutObjectRequest
             {
                 BucketName = s3bucket,
-                Key = filename,
+                Key = fileKey,
                 InputStream = stream
             };
 
@@ -291,13 +354,13 @@ public static class ImageToS3Func
 
                 return new Response(
                     true,
-                    $"https://{s3bucket}.s3.ap-southeast-2.amazonaws.com/{filename}\n"
+                    $"https://{s3bucket}.s3.ap-southeast-2.amazonaws.com/{fileKey}\n"
                 );
             }
             else
             {
                 log.LogError(response.HttpStatusCode.ToString());
-                return new Response(false, filename + " was unable to be uploaded to S3");
+                return new Response(false, fileKey + " was unable to be uploaded to S3");
             }
         }
         catch (AmazonS3Exception e)
@@ -313,22 +376,22 @@ public static class ImageToS3Func
     }
 
     // Check if image already exists on S3, returns true if exists
-    public static async Task<Response> ImageAlreadyExistsOnS3(string filename, ILogger log)
+    public static async Task<Response> ImageAlreadyExistsOnS3(string fileKey, ILogger log)
     {
         try
         {
-            var response = await s3client!.GetObjectAsync(bucketName: s3bucket, key: filename);
+            var response = await s3client!.GetObjectAsync(bucketName: s3bucket, key: fileKey);
             if (response.HttpStatusCode == HttpStatusCode.OK)
             {
-                string msg = filename + " already exists on S3 bucket";
+                string msg = fileKey + " already exists on S3 bucket";
                 log.LogInformation(msg);
                 return new Response(true, msg);
             }
             else
             {
-                log.LogWarning("Received abnormal code from S3: " +
-                response.HttpStatusCode.ToString());
-                return new Response(false);
+                string msg = "Received abnormal code from S3: " + response.HttpStatusCode.ToString();
+                log.LogWarning(msg);
+                return new Response(true, msg);
             }
         }
         catch (Amazon.S3.AmazonS3Exception e)
