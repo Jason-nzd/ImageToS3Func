@@ -19,9 +19,14 @@ public static class ImageToS3Func
     // Singletons and variables for S3 and logging
     static readonly RegionEndpoint region = RegionEndpoint.APSoutheast2;
     static IAmazonS3 s3client;
-    static string s3bucket;
-    static int thumbWidth;
+    static string s3bucket, s3path, filename;
+    static int thumbWidth, quality, fuzz;
     static DateTime startTime;
+    static HttpClient httpClient = new HttpClient();
+
+    // To prevent excess PUT requests, checks can be made for already existing image on the S3 Bucket,
+    //  or if a CDN is in use, the CDN can be checked instead.
+    static readonly bool checkCDNForExistingImagesInsteadOfS3 = true;
 
     [FunctionName("ImageToS3")]
     public static async Task<IActionResult> Run(
@@ -30,6 +35,10 @@ public static class ImageToS3Func
     [HttpTrigger(AuthorizationLevel.Function, "get", Route = null)] HttpRequest req,
     ILogger log)
     {
+        // Build a consolidated message string, which will be added to with all other functions
+        string consolidatedMsg = "ImageToS3 v1.2 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        consolidatedMsg += "".PadRight(68, '-') + "\n\n";
+
         // Store start time for logging function duration
         startTime = DateTime.Now;
 
@@ -40,55 +49,15 @@ public static class ImageToS3Func
         // Try parse integers from query parameters
         // ParseIntWithRange() will return -1 if invalid, out of specified range, or missing
         thumbWidth = ParseIntWithRange(req.Query["width"], min: 16, max: 4096);
-        int quality = ParseIntWithRange(req.Query["quality"], min: 5, max: 100);
-        int fuzz = ParseIntWithRange(req.Query["fuzz"], min: 0, max: 100);
+        quality = ParseIntWithRange(req.Query["quality"], min: 5, max: 100);
+        fuzz = ParseIntWithRange(req.Query["fuzz"], min: 0, max: 100);
 
-        // Set integers to defaults if unable to be parsed
-        thumbWidth = thumbWidth > 0 ? thumbWidth : 200;
-        quality = quality > 0 ? quality : 75;
-        fuzz = fuzz > 0 ? fuzz : 3;
 
-        // Build a consolidated message string, which will be added to with all other functions
-        string consolidatedMsg = "ImageToS3 v1.1 - powered by Azure Functions, AWS S3, and ImageMagick\n";
-        consolidatedMsg += "".PadRight(68, '-') + "\n\n";
-
-        // If query parameters are not valid, return error Message
-        if (destination == null || source == null || !destination.Contains("s3://") || !source.Contains("http"))
-        {
-            return new OkObjectResult(consolidatedMsg +
-                "This function requires 'destination' and 'source' query parameters \nExample:\n\n" +
-                "/ImageToS3?destination=s3://mybucket/path/new-file&source=https://domain.com/heavy-image.png\n\n" +
-                "Optional 'width' (default 200), 'quality' (default 75), 'fuzz' (default 3)" +
-                " parameters can also be set"
-            );
-        }
-
-        // Split s3 destination string into array of strings
-        // Example: s3://mybucket/optional/path/filetosave.webp
-        // Results: [s3:, , mybucket, optional, path, filetosave.webp]
-        string[] destinationChunks = destination.Split('/');
-
-        // Get bucket name from the 2nd index
-        s3bucket = destinationChunks[2]; ;
-
-        // Get optional path string from 3rd to the 2nd to last index
-        string s3path = "";
-        if (destinationChunks.Length > 4)
-        {
-            for (int i = 3; i < destinationChunks.Length - 1; i++)
-            {
-                s3path += destinationChunks[i] + "/";
-            }
-        }
-
-        // Get filename from last index
-        string filename = destinationChunks[destinationChunks.Length - 1];
-        filename = CleanFileName(filename);     // clean and parse filename into .webp extension
-
-        // Add info to consolidatedMsg
-        consolidatedMsg += $"      Source: {source}\n";
-        consolidatedMsg += $" Destination: s3://{s3bucket}/{s3path}{filename}\n";
-        consolidatedMsg += $"   Thumbnail: s3://{s3bucket}/{s3path}{thumbWidth}/{filename}\n\n";
+        // Validate input query parameters, return if unable to validate inputs
+        var inputResponse = ValidateInputParameters(destination, source);
+        consolidatedMsg += inputResponse.Message;
+        if (!inputResponse.Succeeded)
+            return new BadRequestObjectResult(consolidatedMsg);
 
 
         // Establish connection to S3, return if unable to connect
@@ -97,8 +66,12 @@ public static class ImageToS3Func
             return new BadRequestObjectResult(consolidatedMsg + connectResponse.Message);
 
 
-        // Check S3 if file already exists, return if already exists
-        var existsResponse = await ImageAlreadyExistsOnS3(s3path + filename, log);
+        // Check CDN or S3 if file already exists, return if already exists
+        Response existsResponse;
+        if (checkCDNForExistingImagesInsteadOfS3)
+            existsResponse = await ImageAlreadyExistsOnCDN(s3path + filename, log);
+        else
+            existsResponse = await ImageAlreadyExistsOnS3(s3path + filename, log);
         consolidatedMsg += existsResponse.Message;
         if (existsResponse.Succeeded)
             return new OkObjectResult(consolidatedMsg);
@@ -129,22 +102,90 @@ public static class ImageToS3Func
 
         // Upload thumbnail stream to S3, return if unsuccessful
         consolidatedMsg += "S3 Upload of Full-Size and Thumbnail WebPs:\n" + "".PadRight(43, '-') + "\n";
-        var thumbnailResponse = await UploadStreamToS3(s3path + thumbWidth.ToString() + "/" + filename, thumbnailImageStream, log);
+        var thumbnailResponse = await UploadStreamToS3(
+            s3path + thumbWidth.ToString() + "/" + filename, thumbnailImageStream, log
+        );
         consolidatedMsg += thumbnailResponse.Message;
         if (!thumbnailResponse.Succeeded)
             return new BadRequestObjectResult(consolidatedMsg);
 
 
-        // Upload full size image stream to S3, return final consolidated msg
+        // Upload full size image stream to S3, return if failed
         var fullSizeResponse = await UploadStreamToS3(s3path + filename, fullSizeImageStream, log);
+        consolidatedMsg += fullSizeResponse.Message;
+        if (!fullSizeResponse.Succeeded) return new BadRequestObjectResult(consolidatedMsg);
 
+
+        // Append CDN urls of full-size and thumbnail if applicable
+        if (checkCDNForExistingImagesInsteadOfS3)
+        {
+            string cdnDomain = Environment.GetEnvironmentVariable("CDN_DOMAIN");
+            consolidatedMsg += $"{cdnDomain}/{s3path}{thumbWidth}/{filename}\n";
+            consolidatedMsg += $"{cdnDomain}/{s3path}{filename}\n";
+        }
+
+        // Log S3 upload time
         double timeElapsed = Math.Round((DateTime.Now - startTime).TotalSeconds, 2);
-        consolidatedMsg += fullSizeResponse.Message + $"\nS3 Upload Took {timeElapsed}s";
+        consolidatedMsg += $"\nS3 Upload Took {timeElapsed}s";
 
-        if (fullSizeResponse.Succeeded)
-            return new OkObjectResult(consolidatedMsg);
-        else
-            return new BadRequestObjectResult(consolidatedMsg);
+
+        // Return final consolidated msg
+        return new OkObjectResult(consolidatedMsg);
+    }
+
+    private static Response ValidateInputParameters(string destination, string source)
+    {
+        // Auto-fix common typos
+        destination = destination.Replace("s3:/", "s3://").Replace("//", "/");
+
+        // If query parameters are not valid, return error Message
+        if (destination == null || source == null || !destination.Contains("s3://") || !source.Contains("http"))
+        {
+            return new Response(false,
+                "This function requires 'destination' and 'source' query parameters \nExample:\n\n" +
+                "/ImageToS3?destination=s3://mybucket/path/new-file&source=https://domain.com/heavy-image.png\n\n" +
+                "Optional 'width' (default 200), 'quality' (default 75), 'fuzz' (default 3)" +
+                " parameters can also be set"
+            );
+        }
+
+        // Split s3 destination string into array of strings
+        // Example: s3://mybucket/optional/path/filetosave.webp
+        // Results: [s3:, , mybucket, optional, path, filetosave.webp]
+        string[] destinationChunks = destination.Split('/');
+
+        // Get bucket name from the 2nd index
+        s3bucket = destinationChunks[2];
+
+        // Get optional path string from 3rd to the 2nd to last index
+        s3path = "";
+        if (destinationChunks.Length > 4)
+        {
+            for (int i = 3; i < destinationChunks.Length - 1; i++)
+            {
+                s3path += destinationChunks[i] + "/";
+            }
+        }
+
+        // Get filename from last index
+        filename = destinationChunks[destinationChunks.Length - 1];
+        filename = CleanFileName(filename);     // clean and parse filename into .webp extension
+
+        // Set integers to defaults if unable to be parsed
+        thumbWidth = thumbWidth > 0 ? thumbWidth : 200;
+        quality = quality > 0 ? quality : 75;
+        fuzz = fuzz > 0 ? fuzz : 3;
+
+        // Build return msg
+        string successMsg = $"      Source: {source}\n" +
+            $" Destination: s3://{s3bucket}/{s3path}{filename}\n" +
+            $"   Thumbnail: s3://{s3bucket}/{s3path}{thumbWidth}/{filename}\n";
+
+        // Debug log
+        // successMsg += $"bucket: {s3bucket} path: {s3path} file: {filename}";
+
+        // Add info to consolidatedMsg
+        return new Response(true, successMsg + "\n");
     }
 
     private static async Task<Response> DownloadImageUrlToStream(string url, ILogger log)
@@ -152,12 +193,10 @@ public static class ImageToS3Func
         try
         {
             // Download image using httpclient
-            HttpClient httpclient = new HttpClient();
-            byte[] downloadedBytes = await httpclient!.GetByteArrayAsync(url);
+            byte[] downloadedBytes = await httpClient!.GetByteArrayAsync(url);
 
-            // Log filename and dispose httpclient
-            log.LogWarning(ExtractFileNameFromUrl(url));
-            httpclient.Dispose();
+            // Log filename
+            log.LogWarning("Downloaded " + ExtractFileNameFromUrl(url));
 
             // Measure time elapsed
             double timeElapsed = Math.Round((DateTime.Now - startTime).TotalSeconds, 2);
@@ -166,8 +205,8 @@ public static class ImageToS3Func
             // Return Response with success, message, and byte[] payload
             return new Response(
                 true,
-                $"  Downloaded File In: {timeElapsed}s\n" +
-                $"    Source File Size: {printFileSize(downloadedBytes.LongLength)}\n",
+                $"Downloading File Took: {timeElapsed}s\n" +
+                $"     Source File Size: {printFileSize(downloadedBytes.LongLength)}\n",
                 downloadedBytes
             );
         }
@@ -208,10 +247,10 @@ public static class ImageToS3Func
             }
             return new Response(
                 false,
-                "Error: Unable to connect to S3. \n\nCheck Azure Function > Configuration > " +
-                "Application Settings were set:\n" +
+                "Error: Unable to connect to S3. \n\n" +
+                "Check Azure Function Application Settings or local.settings.json were set:\n" +
                 "AWS_ACCESS_KEY: <your aws access key>\n" +
-                "AWS_SECRET_KEY: <your aws secret key>\n\n"
+                "AWS_SECRET_KEY: <your aws secret key>\n\n" + e.Message
             );
         }
     }
@@ -260,7 +299,7 @@ public static class ImageToS3Func
                 // If image conversion is successful, log Message
                 return new Response(
                     true,
-                    $"   Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
+                    $"    Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
                     $"ImageMagick Conversion - Took {timeElapsed}s\n" + "".PadRight(36, '-') + "\n" +
                     $"       New File Size: {printFileSize(fullSizeImageStream.Length)}\n" +
                     $"        WebP Quality: {quality}%\n" +
@@ -404,6 +443,41 @@ public static class ImageToS3Func
             {
                 log.LogError(e.Message);
                 return new Response(true, e.ToString());
+            }
+        }
+        catch (System.Exception e)
+        {
+            // Return true which will end the program and display the error
+            log.LogError(e.Message);
+            return new Response(true, e.ToString());
+        }
+    }
+
+    // Checks if file already exists on CDN
+    public static async Task<Response> ImageAlreadyExistsOnCDN(string fileKey, ILogger log)
+    {
+        try
+        {
+            // Get CDN domain from env
+            string cdn = Environment.GetEnvironmentVariable("CDN_DOMAIN");
+            if (cdn == null) return new Response(true, "Error checking env variable 'CDN_DOMAIN' not found");
+
+            var response = await httpClient.GetAsync(cdn + "/" + fileKey);
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                string msg = $"{cdn}/{fileKey} already exists on CDN";
+                log.LogInformation(msg);
+                return new Response(true, msg);
+            }
+            else if (response.StatusCode == HttpStatusCode.Forbidden)
+            {
+                return new Response(false);
+            }
+            else
+            {
+                string msg = $"ImageAlreadyExistsOnCDN() - Received abnormal code {response.StatusCode}";
+                log.LogWarning(msg);
+                return new Response(true, msg);
             }
         }
         catch (System.Exception e)
