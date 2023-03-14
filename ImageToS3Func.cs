@@ -61,16 +61,16 @@ public static class ImageToS3Func
         if (!inputResponse.Succeeded)
             return new BadRequestObjectResult(consolidatedMsg);
 
-        // Debug log
-        consolidatedMsg += $"\n\naftervalidation bucket: {s3bucket} path: {s3path} file: {filename}\n";
-
 
         // Establish connection to S3, return if unable to connect
         var connectResponse = await ConnectToS3();
         if (!connectResponse.Succeeded)
             return new BadRequestObjectResult(consolidatedMsg + connectResponse.Message);
 
+        // Debug log
+        consolidatedMsg += $"\n\nafterconnect file: {filename}\n";
 
+        // Check for or overwrite existing images
         if (forceOverwrite)
         {
             // Log if forcing overwrite, and then skip checks to S3 or CDN
@@ -94,7 +94,7 @@ public static class ImageToS3Func
                 return new OkObjectResult(consolidatedMsg);
         }
 
-        consolidatedMsg += $"\n\nafterexists bucket: {s3bucket} path: {s3path} file: {filename}\n";
+        consolidatedMsg += $"\n\nafterexists file: {filename}\n";
 
         // Download from url, return if unsuccessful
         var downloadResponse = await DownloadImageUrlToStream(source, log);
@@ -120,13 +120,14 @@ public static class ImageToS3Func
 
 
         // Upload full size image stream to S3, return if failed
+        consolidatedMsg += "S3 Upload of Full-Size and Thumbnail WebPs:\n" + "".PadRight(43, '-') + "\n";
+
         var fullSizeResponse = await UploadStreamToS3(fullSizeImageStream, log);
         consolidatedMsg += fullSizeResponse.Message;
         if (!fullSizeResponse.Succeeded) return new BadRequestObjectResult(consolidatedMsg);
 
 
         // Upload thumbnail stream to S3, return if unsuccessful
-        consolidatedMsg += "S3 Upload of Full-Size and Thumbnail WebPs:\n" + "".PadRight(43, '-') + "\n";
         var thumbnailResponse = await UploadStreamToS3(
             thumbnailImageStream, log, addThumbPath: thumbWidth.ToString() + "/"
         );
@@ -478,23 +479,26 @@ public static class ImageToS3Func
             string fileKey = s3path + filename;
             // Get CDN domain from env
             string cdn = Environment.GetEnvironmentVariable("CDN_DOMAIN");
-            if (cdn == null) return new Response(true, "Error checking env variable 'CDN_DOMAIN' not found");
+            if (cdn == null) return new Response(true, "Error checking env variable 'CDN_DOMAIN' not found\n");
 
             var response = await httpClient.GetAsync(cdn + "/" + fileKey);
+
+            // If existing image found on CDN, we can end the program
             if (response.StatusCode == HttpStatusCode.OK)
             {
                 string msg = $"{cdn}/{fileKey} already exists on CDN\n";
-                msg += $"\n\nduringexists bucket: {s3bucket} path: {s3path} file: {filename}\n";
                 log.LogInformation(msg);
                 return new Response(true, msg);
             }
             else if (response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.NotFound)
             {
-                return new Response(false, $"{cdn}/{fileKey} not found on CDN\n");
+                string msg = $"{cdn}/{fileKey} not found on CDN\n";
+                msg += $"\n\nduring-exists  file: {filename}\n";
+                return new Response(false, msg);
             }
             else
             {
-                string msg = $"ImageAlreadyExistsOnCDN() - Received abnormal code {response.StatusCode}";
+                string msg = $"ImageAlreadyExistsOnCDN() - Received abnormal code: {response.StatusCode}\n";
                 log.LogWarning(msg);
                 return new Response(true, msg);
             }
