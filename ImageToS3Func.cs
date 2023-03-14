@@ -19,7 +19,7 @@ public static class ImageToS3Func
     // Singletons and variables for S3 and logging
     static readonly RegionEndpoint region = RegionEndpoint.APSoutheast2;
     static IAmazonS3 s3client;
-    static string s3bucket, s3path, filename;
+    static string s3bucket = "", s3path = "", filename = "";
     static int thumbWidth, quality, fuzz;
     static DateTime startTime;
     static HttpClient httpClient = new HttpClient();
@@ -36,7 +36,7 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to with all other functions
-        string consolidatedMsg = "ImageToS3 v1.3.0 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        string consolidatedMsg = "ImageToS3 v1.3.1 - powered by Azure Functions, AWS S3, and ImageMagick\n";
         consolidatedMsg += "".PadRight(68, '-') + "\n\n";
 
         // Store start time for logging function duration
@@ -61,12 +61,14 @@ public static class ImageToS3Func
         if (!inputResponse.Succeeded)
             return new BadRequestObjectResult(consolidatedMsg);
 
+        // Debug log
+        consolidatedMsg += $"\nbucket: {s3bucket} path: {s3path} file: {filename}\n\n";
+
 
         // Establish connection to S3, return if unable to connect
         var connectResponse = await ConnectToS3();
         if (!connectResponse.Succeeded)
             return new BadRequestObjectResult(consolidatedMsg + connectResponse.Message);
-
 
 
         if (forceOverwrite)
@@ -196,9 +198,6 @@ public static class ImageToS3Func
         string successMsg = $"      Source: {source}\n" +
             $" Destination: s3://{s3bucket}/{s3path}{filename}\n" +
             $"   Thumbnail: s3://{s3bucket}/{s3path}{thumbWidth}/{filename}\n";
-
-        // Debug log
-        // successMsg += $"bucket: {s3bucket} path: {s3path} file: {filename}";
 
         // Add info to consolidatedMsg
         return new Response(true, successMsg + "\n");
