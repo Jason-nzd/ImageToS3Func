@@ -36,7 +36,7 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to with all other functions
-        string consolidatedMsg = "ImageToS3 v1.3.1 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        string consolidatedMsg = "ImageToS3 v1.3.2 - powered by Azure Functions, AWS S3, and ImageMagick\n";
         consolidatedMsg += "".PadRight(68, '-') + "\n\n";
 
         // Store start time for logging function duration
@@ -62,7 +62,7 @@ public static class ImageToS3Func
             return new BadRequestObjectResult(consolidatedMsg);
 
         // Debug log
-        consolidatedMsg += $"\nbucket: {s3bucket} path: {s3path} file: {filename}\n\n";
+        consolidatedMsg += $"\n\naftervalidation bucket: {s3bucket} path: {s3path} file: {filename}\n";
 
 
         // Establish connection to S3, return if unable to connect
@@ -82,18 +82,19 @@ public static class ImageToS3Func
             //  this saves on more expensive GET requests to S3
             if (checkCDNForExistingImagesFirst)
             {
-                Response cdnResponse = await ImageAlreadyExistsOnCDN(s3path + filename, log);
+                Response cdnResponse = await ImageAlreadyExistsOnCDN(log);
                 consolidatedMsg += cdnResponse.Message;
                 if (cdnResponse.Succeeded) return new OkObjectResult(consolidatedMsg);
             }
 
             // Check S3 if file already exists, return if already exists
-            Response existsResponse = await ImageAlreadyExistsOnS3(s3path + filename, log);
+            Response existsResponse = await ImageAlreadyExistsOnS3(log);
             consolidatedMsg += existsResponse.Message;
             if (existsResponse.Succeeded)
                 return new OkObjectResult(consolidatedMsg);
         }
 
+        consolidatedMsg += $"\n\nafterexists bucket: {s3bucket} path: {s3path} file: {filename}\n";
 
         // Download from url, return if unsuccessful
         var downloadResponse = await DownloadImageUrlToStream(source, log);
@@ -118,23 +119,23 @@ public static class ImageToS3Func
             return new BadRequestObjectResult(consolidatedMsg);
 
 
+        // Upload full size image stream to S3, return if failed
+        var fullSizeResponse = await UploadStreamToS3(fullSizeImageStream, log);
+        consolidatedMsg += fullSizeResponse.Message;
+        if (!fullSizeResponse.Succeeded) return new BadRequestObjectResult(consolidatedMsg);
+
+
         // Upload thumbnail stream to S3, return if unsuccessful
         consolidatedMsg += "S3 Upload of Full-Size and Thumbnail WebPs:\n" + "".PadRight(43, '-') + "\n";
         var thumbnailResponse = await UploadStreamToS3(
-            s3path + thumbWidth.ToString() + "/" + filename, thumbnailImageStream, log
+            thumbnailImageStream, log, addThumbPath: thumbWidth.ToString() + "/"
         );
         consolidatedMsg += thumbnailResponse.Message;
         if (!thumbnailResponse.Succeeded)
             return new BadRequestObjectResult(consolidatedMsg);
 
 
-        // Upload full size image stream to S3, return if failed
-        var fullSizeResponse = await UploadStreamToS3(s3path + filename, fullSizeImageStream, log);
-        consolidatedMsg += fullSizeResponse.Message;
-        if (!fullSizeResponse.Succeeded) return new BadRequestObjectResult(consolidatedMsg);
-
-
-        // Append CDN urls of full-size and thumbnail if applicable
+        // Log CDN urls of full-size and thumbnail if applicable
         if (checkCDNForExistingImagesFirst)
         {
             string cdnDomain = Environment.GetEnvironmentVariable("CDN_DOMAIN");
@@ -385,13 +386,13 @@ public static class ImageToS3Func
     }
 
     private static async Task<Response> UploadStreamToS3(
-        string fileKey,
         Stream stream,
-        ILogger log)
+        ILogger log,
+        string addThumbPath = "")
     {
         try
         {
-
+            string fileKey = s3path + addThumbPath + filename;
             var putRequest = new PutObjectRequest
             {
                 BucketName = s3bucket,
@@ -430,8 +431,9 @@ public static class ImageToS3Func
     }
 
     // Check if image already exists on S3, returns true if exists
-    public static async Task<Response> ImageAlreadyExistsOnS3(string fileKey, ILogger log)
+    public static async Task<Response> ImageAlreadyExistsOnS3(ILogger log)
     {
+        string fileKey = s3path + filename;
         try
         {
             var response = await s3client!.GetObjectAsync(bucketName: s3bucket, key: fileKey);
@@ -469,10 +471,11 @@ public static class ImageToS3Func
     }
 
     // Checks if file already exists on CDN
-    public static async Task<Response> ImageAlreadyExistsOnCDN(string fileKey, ILogger log)
+    public static async Task<Response> ImageAlreadyExistsOnCDN(ILogger log)
     {
         try
         {
+            string fileKey = s3path + filename;
             // Get CDN domain from env
             string cdn = Environment.GetEnvironmentVariable("CDN_DOMAIN");
             if (cdn == null) return new Response(true, "Error checking env variable 'CDN_DOMAIN' not found");
@@ -481,6 +484,7 @@ public static class ImageToS3Func
             if (response.StatusCode == HttpStatusCode.OK)
             {
                 string msg = $"{cdn}/{fileKey} already exists on CDN\n";
+                msg += $"\n\nduringexists bucket: {s3bucket} path: {s3path} file: {filename}\n";
                 log.LogInformation(msg);
                 return new Response(true, msg);
             }
