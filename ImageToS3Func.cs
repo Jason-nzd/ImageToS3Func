@@ -26,7 +26,7 @@ public static class ImageToS3Func
 
     // To prevent excess PUT requests, checks can be made for already existing image on the S3 Bucket,
     //  or if a CDN is in use, the CDN can be checked instead.
-    static readonly bool checkCDNForExistingImagesInsteadOfS3 = true;
+    static readonly bool checkCDNForExistingImagesFirst = true;
 
     [FunctionName("ImageToS3")]
     public static async Task<IActionResult> Run(
@@ -36,7 +36,7 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to with all other functions
-        string consolidatedMsg = "ImageToS3 v1.2 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        string consolidatedMsg = "ImageToS3 v1.3.0 - powered by Azure Functions, AWS S3, and ImageMagick\n";
         consolidatedMsg += "".PadRight(68, '-') + "\n\n";
 
         // Store start time for logging function duration
@@ -45,6 +45,8 @@ public static class ImageToS3Func
         // Get query parameters from http trigger
         string destination = req.Query["destination"];
         string source = req.Query["source"];
+        string overwrite = req.Query["overwrite"];
+        bool forceOverwrite = (overwrite == "true");
 
         // Try parse integers from query parameters
         // ParseIntWithRange() will return -1 if invalid, out of specified range, or missing
@@ -66,15 +68,29 @@ public static class ImageToS3Func
             return new BadRequestObjectResult(consolidatedMsg + connectResponse.Message);
 
 
-        // Check CDN or S3 if file already exists, return if already exists
-        Response existsResponse;
-        if (checkCDNForExistingImagesInsteadOfS3)
-            existsResponse = await ImageAlreadyExistsOnCDN(s3path + filename, log);
+
+        if (forceOverwrite)
+        {
+            // Log if forcing overwrite, and then skip checks to S3 or CDN
+            consolidatedMsg += "forceOverwrite: true\n";
+        }
         else
-            existsResponse = await ImageAlreadyExistsOnS3(s3path + filename, log);
-        consolidatedMsg += existsResponse.Message;
-        if (existsResponse.Succeeded)
-            return new OkObjectResult(consolidatedMsg);
+        {
+            // Conditionally check CDN if file already exists, return if already exists,
+            //  this saves on more expensive GET requests to S3
+            if (checkCDNForExistingImagesFirst)
+            {
+                Response cdnResponse = await ImageAlreadyExistsOnCDN(s3path + filename, log);
+                consolidatedMsg += cdnResponse.Message;
+                if (cdnResponse.Succeeded) return new OkObjectResult(consolidatedMsg);
+            }
+
+            // Check S3 if file already exists, return if already exists
+            Response existsResponse = await ImageAlreadyExistsOnS3(s3path + filename, log);
+            consolidatedMsg += existsResponse.Message;
+            if (existsResponse.Succeeded)
+                return new OkObjectResult(consolidatedMsg);
+        }
 
 
         // Download from url, return if unsuccessful
@@ -117,7 +133,7 @@ public static class ImageToS3Func
 
 
         // Append CDN urls of full-size and thumbnail if applicable
-        if (checkCDNForExistingImagesInsteadOfS3)
+        if (checkCDNForExistingImagesFirst)
         {
             string cdnDomain = Environment.GetEnvironmentVariable("CDN_DOMAIN");
             consolidatedMsg += $"{cdnDomain}/{s3path}{thumbWidth}/{filename}\n";
@@ -205,7 +221,7 @@ public static class ImageToS3Func
             // Return Response with success, message, and byte[] payload
             return new Response(
                 true,
-                $"Downloading File Took: {timeElapsed}s\n" +
+                $"\nDownloading File Took: {timeElapsed}s\n" +
                 $"     Source File Size: {printFileSize(downloadedBytes.LongLength)}\n",
                 downloadedBytes
             );
@@ -422,7 +438,7 @@ public static class ImageToS3Func
             var response = await s3client!.GetObjectAsync(bucketName: s3bucket, key: fileKey);
             if (response.HttpStatusCode == HttpStatusCode.OK)
             {
-                string msg = fileKey + " already exists on S3 bucket";
+                string msg = $"s3://{s3bucket}/{fileKey} already exists on S3 bucket";
                 log.LogInformation(msg);
                 return new Response(true, msg);
             }
@@ -437,7 +453,7 @@ public static class ImageToS3Func
         {
             if (e.Message.StartsWith("The specified key does not exist."))
             {
-                return new Response(false);
+                return new Response(false, $"s3://{s3bucket}/{fileKey} doesn't yet exist on S3\n");
             }
             else
             {
@@ -465,13 +481,13 @@ public static class ImageToS3Func
             var response = await httpClient.GetAsync(cdn + "/" + fileKey);
             if (response.StatusCode == HttpStatusCode.OK)
             {
-                string msg = $"{cdn}/{fileKey} already exists on CDN";
+                string msg = $"{cdn}/{fileKey} already exists on CDN\n";
                 log.LogInformation(msg);
                 return new Response(true, msg);
             }
-            else if (response.StatusCode == HttpStatusCode.Forbidden)
+            else if (response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.NotFound)
             {
-                return new Response(false);
+                return new Response(false, $"{cdn}/{fileKey} not found on CDN\n");
             }
             else
             {
