@@ -19,7 +19,7 @@ public static class ImageToS3Func
     // Singletons and variables for S3 and logging
     static readonly RegionEndpoint region = RegionEndpoint.APSoutheast2;
     static IAmazonS3 s3client;
-    static string s3bucket = "", s3path = "", filename = "";
+    static string s3bucket = "", s3path = "";
     static int thumbWidth, quality, fuzz;
     static DateTime startTime;
     static HttpClient httpClient = new HttpClient();
@@ -36,7 +36,7 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to with all other functions
-        string consolidatedMsg = "ImageToS3 v1.3.2 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        string consolidatedMsg = "ImageToS3 v1.3.3 - powered by Azure Functions, AWS S3, and ImageMagick\n";
         consolidatedMsg += "".PadRight(68, '-') + "\n\n";
 
         // Store start time for logging function duration
@@ -60,7 +60,9 @@ public static class ImageToS3Func
         consolidatedMsg += inputResponse.Message;
         if (!inputResponse.Succeeded)
             return new BadRequestObjectResult(consolidatedMsg);
+        string fileName = ValidateFileName(destination);
 
+        consolidatedMsg += $"\n\naftervalidate file: {fileName}\n";
 
         // Establish connection to S3, return if unable to connect
         var connectResponse = await ConnectToS3();
@@ -68,7 +70,7 @@ public static class ImageToS3Func
             return new BadRequestObjectResult(consolidatedMsg + connectResponse.Message);
 
         // Debug log
-        consolidatedMsg += $"\n\nafterconnect file: {filename}\n";
+        consolidatedMsg += $"\n\nafterconnect file: {fileName}\n";
 
         // Check for or overwrite existing images
         if (forceOverwrite)
@@ -82,19 +84,18 @@ public static class ImageToS3Func
             //  this saves on more expensive GET requests to S3
             if (checkCDNForExistingImagesFirst)
             {
-                Response cdnResponse = await ImageAlreadyExistsOnCDN(log);
+                Response cdnResponse = await ImageAlreadyExistsOnCDN(fileName, log);
                 consolidatedMsg += cdnResponse.Message;
                 if (cdnResponse.Succeeded) return new OkObjectResult(consolidatedMsg);
             }
 
             // Check S3 if file already exists, return if already exists
-            Response existsResponse = await ImageAlreadyExistsOnS3(log);
+            Response existsResponse = await ImageAlreadyExistsOnS3(fileName, log);
             consolidatedMsg += existsResponse.Message;
             if (existsResponse.Succeeded)
                 return new OkObjectResult(consolidatedMsg);
         }
 
-        consolidatedMsg += $"\n\nafterexists file: {filename}\n";
 
         // Download from url, return if unsuccessful
         var downloadResponse = await DownloadImageUrlToStream(source, log);
@@ -122,13 +123,13 @@ public static class ImageToS3Func
         // Upload full size image stream to S3, return if failed
         consolidatedMsg += "S3 Upload of Full-Size and Thumbnail WebPs:\n" + "".PadRight(43, '-') + "\n";
 
-        var fullSizeResponse = await UploadStreamToS3(fullSizeImageStream, log);
+        var fullSizeResponse = await UploadStreamToS3(fileName, fullSizeImageStream, log);
         consolidatedMsg += fullSizeResponse.Message;
         if (!fullSizeResponse.Succeeded) return new BadRequestObjectResult(consolidatedMsg);
 
 
         // Upload thumbnail stream to S3, return if unsuccessful
-        var thumbnailResponse = await UploadStreamToS3(
+        var thumbnailResponse = await UploadStreamToS3(fileName,
             thumbnailImageStream, log, addThumbPath: thumbWidth.ToString() + "/"
         );
         consolidatedMsg += thumbnailResponse.Message;
@@ -140,8 +141,8 @@ public static class ImageToS3Func
         if (checkCDNForExistingImagesFirst)
         {
             string cdnDomain = Environment.GetEnvironmentVariable("CDN_DOMAIN");
-            consolidatedMsg += $"{cdnDomain}/{s3path}{thumbWidth}/{filename}\n";
-            consolidatedMsg += $"{cdnDomain}/{s3path}{filename}\n";
+            consolidatedMsg += $"{cdnDomain}/{s3path}{thumbWidth}/{fileName}\n";
+            consolidatedMsg += $"{cdnDomain}/{s3path}{fileName}\n";
         }
 
         // Log S3 upload time
@@ -188,8 +189,7 @@ public static class ImageToS3Func
         }
 
         // Get filename from last index
-        filename = destinationChunks[destinationChunks.Length - 1];
-        filename = CleanFileName(filename);     // clean and parse filename into .webp extension
+        string fileName = destinationChunks[destinationChunks.Length - 1];
 
         // Set integers to defaults if unable to be parsed
         thumbWidth = thumbWidth > 0 ? thumbWidth : 200;
@@ -198,11 +198,36 @@ public static class ImageToS3Func
 
         // Build return msg
         string successMsg = $"      Source: {source}\n" +
-            $" Destination: s3://{s3bucket}/{s3path}{filename}\n" +
-            $"   Thumbnail: s3://{s3bucket}/{s3path}{thumbWidth}/{filename}\n";
+            $" Destination: s3://{s3bucket}/{s3path}{fileName}\n" +
+            $"   Thumbnail: s3://{s3bucket}/{s3path}{thumbWidth}/{fileName}\n";
 
         // Add info to consolidatedMsg
         return new Response(true, successMsg + "\n");
+    }
+
+    private static string ValidateFileName(string destination)
+    {
+        // Split s3 destination string into array of strings
+        // Example: s3://mybucket/optional/path/filetosave.webp
+        // Results: [s3:, , mybucket, optional, path, filetosave.webp]
+        string[] destinationChunks = destination.Split('/');
+
+        // Get filename from last index
+        string fileName = destinationChunks[destinationChunks.Length - 1];
+
+        // If filename contains a .extension, replace it with webp
+        if (fileName.Contains('.'))
+        {
+            string[] splitfileName = fileName.Split('.');
+            string originalExtension = splitfileName[splitfileName.Length - 1].ToLower();
+            fileName = fileName.Replace(originalExtension, "webp");
+        }
+        else
+        {
+            // If fileName has no .extension, add .webp
+            fileName = fileName += ".webp";
+        }
+        return fileName;
     }
 
     private static async Task<Response> DownloadImageUrlToStream(string url, ILogger log)
@@ -369,31 +394,15 @@ public static class ImageToS3Func
         }
     }
 
-    private static string CleanFileName(string filename)
-    {
-        // If filename contains a .extension, replace it with webp
-        if (filename.Contains('.'))
-        {
-            string[] splitfilename = filename.Split('.');
-            string originalExtension = splitfilename[splitfilename.Length - 1].ToLower();
-            filename = filename.Replace(originalExtension, "webp");
-        }
-        else
-        {
-            // If filename has no .extension, add .webp
-            filename = filename += ".webp";
-        }
-        return filename;
-    }
-
     private static async Task<Response> UploadStreamToS3(
+        string fileName,
         Stream stream,
         ILogger log,
         string addThumbPath = "")
     {
         try
         {
-            string fileKey = s3path + addThumbPath + filename;
+            string fileKey = s3path + addThumbPath + fileName;
             var putRequest = new PutObjectRequest
             {
                 BucketName = s3bucket,
@@ -432,9 +441,9 @@ public static class ImageToS3Func
     }
 
     // Check if image already exists on S3, returns true if exists
-    public static async Task<Response> ImageAlreadyExistsOnS3(ILogger log)
+    public static async Task<Response> ImageAlreadyExistsOnS3(string fileName, ILogger log)
     {
-        string fileKey = s3path + filename;
+        string fileKey = s3path + fileName;
         try
         {
             var response = await s3client!.GetObjectAsync(bucketName: s3bucket, key: fileKey);
@@ -472,11 +481,11 @@ public static class ImageToS3Func
     }
 
     // Checks if file already exists on CDN
-    public static async Task<Response> ImageAlreadyExistsOnCDN(ILogger log)
+    public static async Task<Response> ImageAlreadyExistsOnCDN(string fileName, ILogger log)
     {
         try
         {
-            string fileKey = s3path + filename;
+            string fileKey = s3path + fileName;
             // Get CDN domain from env
             string cdn = Environment.GetEnvironmentVariable("CDN_DOMAIN");
             if (cdn == null) return new Response(true, "Error checking env variable 'CDN_DOMAIN' not found\n");
@@ -493,7 +502,7 @@ public static class ImageToS3Func
             else if (response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.NotFound)
             {
                 string msg = $"{cdn}/{fileKey} not found on CDN\n";
-                msg += $"\n\nduring-exists  file: {filename}\n";
+                msg += $"\n\nduring-exists  file: {fileName}\n";
                 return new Response(false, msg);
             }
             else
