@@ -24,10 +24,6 @@ public static class ImageToS3Func
     static DateTime startTime;
     static HttpClient httpClient = new HttpClient();
 
-    // To prevent excess PUT requests, checks can be made for already existing image on the S3 Bucket,
-    //  or if a CDN is in use, the CDN can be checked instead.
-    static readonly bool checkCDNForExistingImagesFirst = true;
-
     [FunctionName("ImageToS3")]
     public static async Task<IActionResult> Run(
 
@@ -36,7 +32,7 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to with all other functions
-        string consolidatedMsg = "ImageToS3 v1.3.3 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        string consolidatedMsg = "ImageToS3 v1.4.0 - powered by Azure Functions, AWS S3, and ImageMagick\n";
         consolidatedMsg += "".PadRight(68, '-') + "\n\n";
 
         // Store start time for logging function duration
@@ -45,128 +41,130 @@ public static class ImageToS3Func
         // Get query parameters from http trigger
         string destination = req.Query["destination"];
         string source = req.Query["source"];
+
+        // Check for overwrite of existing images
         string overwrite = req.Query["overwrite"];
-        bool forceOverwrite = (overwrite == "true");
+        bool forceOverwrite = (overwrite != null && overwrite == "true");
 
-        // Try parse integers from query parameters
-        // ParseIntWithRange() will return -1 if invalid, out of specified range, or missing
-        thumbWidth = ParseIntWithRange(req.Query["width"], min: 16, max: 4096);
-        quality = ParseIntWithRange(req.Query["quality"], min: 5, max: 100);
-        fuzz = ParseIntWithRange(req.Query["fuzz"], min: 0, max: 100);
+        // To prevent excess PUT requests, checks can be made for already existing image on the S3 Bucket,
+        //  or if a CDN is in use, the CDN can be checked first to reduce S3 GET requests.
+        string cdnPath = req.Query["cdnPath"];
+        bool checkCDNForExistingImagesFirst = (cdnPath != null);
 
-
-        // Validate input query parameters, return if unable to validate inputs
-        var inputResponse = ValidateInputParameters(destination, source);
-        consolidatedMsg += inputResponse.Message;
-        if (!inputResponse.Succeeded)
-            return new BadRequestObjectResult(consolidatedMsg);
-        string fileName = ValidateFileName(destination);
-
-        consolidatedMsg += $"\n\naftervalidate file: {fileName}\n";
-
-        // Establish connection to S3, return if unable to connect
-        var connectResponse = await ConnectToS3();
-        if (!connectResponse.Succeeded)
-            return new BadRequestObjectResult(consolidatedMsg + connectResponse.Message);
-
-        // Debug log
-        consolidatedMsg += $"\n\nafterconnect file: {fileName}\n";
-
-        // Check for or overwrite existing images
-        if (forceOverwrite)
+        try
         {
-            // Log if forcing overwrite, and then skip checks to S3 or CDN
-            consolidatedMsg += "forceOverwrite: true\n";
-        }
-        else
-        {
-            // Conditionally check CDN if file already exists, return if already exists,
-            //  this saves on more expensive GET requests to S3
-            if (checkCDNForExistingImagesFirst)
+            // Try parse integers from query parameters
+            // ParseIntWithRange() will return -1 if invalid, out of specified range, or missing
+            thumbWidth = ParseIntWithRange(req.Query["width"], min: 16, max: 4096);
+            quality = ParseIntWithRange(req.Query["quality"], min: 5, max: 100);
+            fuzz = ParseIntWithRange(req.Query["fuzz"], min: 0, max: 100);
+
+
+            // Validate input query parameters, return if unable to validate inputs
+            var inputResponse = ValidateInputParameters(destination, source);
+            consolidatedMsg += inputResponse.Message;
+            if (!inputResponse.Succeeded)
+                return new BadRequestObjectResult(consolidatedMsg);
+            string fileName = ValidateFileName(destination);
+
+
+            // Establish connection to S3, return if unable to connect
+            var connectResponse = await ConnectToS3();
+            if (!connectResponse.Succeeded)
+                return new BadRequestObjectResult(consolidatedMsg + connectResponse.Message);
+
+
+            if (!forceOverwrite)
             {
-                Response cdnResponse = await ImageAlreadyExistsOnCDN(fileName, log);
-                consolidatedMsg += cdnResponse.Message;
-                if (cdnResponse.Succeeded) return new OkObjectResult(consolidatedMsg);
+                // Conditionally check CDN if file already exists, return if already exists,
+                //  this saves on more expensive GET requests to S3
+                if (checkCDNForExistingImagesFirst)
+                {
+                    Response cdnResponse = await ImageAlreadyExistsOnCDN(fileName, cdnPath, log);
+                    consolidatedMsg += cdnResponse.Message;
+                    if (cdnResponse.Succeeded) return new OkObjectResult(consolidatedMsg);
+                }
+
+                // Check S3 if file already exists, return if already exists
+                Response existsResponse = await ImageAlreadyExistsOnS3(fileName, log);
+                consolidatedMsg += existsResponse.Message;
+                if (existsResponse.Succeeded)
+                    return new OkObjectResult(consolidatedMsg);
             }
 
-            // Check S3 if file already exists, return if already exists
-            Response existsResponse = await ImageAlreadyExistsOnS3(fileName, log);
-            consolidatedMsg += existsResponse.Message;
-            if (existsResponse.Succeeded)
-                return new OkObjectResult(consolidatedMsg);
+            // Download from url, return if unsuccessful
+            var downloadResponse = await DownloadImageUrlToStream(source, log);
+            consolidatedMsg += downloadResponse.Message;
+            if (!downloadResponse.Succeeded)
+                return new BadRequestObjectResult(consolidatedMsg);
+
+
+            // Load stream into ImageMagick for conversion, return if unsuccessful
+            Stream thumbnailImageStream = new MemoryStream();
+            Stream fullSizeImageStream = new MemoryStream();
+            var imResponse = MakeImageTransparent(
+                downloadResponse.bytePayload,
+                fullSizeImageStream,
+                thumbnailImageStream,
+                log,
+                quality,
+                fuzz
+            );
+            consolidatedMsg += imResponse.Message;
+            if (!imResponse.Succeeded)
+                return new BadRequestObjectResult(consolidatedMsg);
+
+
+            // Upload full size image stream to S3, return if failed
+            consolidatedMsg += "S3 Upload of Full-Size and Thumbnail WebPs:\n" + "".PadRight(43, '-') + "\n";
+
+            var fullSizeResponse = await UploadStreamToS3(fileName, fullSizeImageStream, log);
+            consolidatedMsg += fullSizeResponse.Message;
+            if (!fullSizeResponse.Succeeded) return new BadRequestObjectResult(consolidatedMsg);
+
+
+            // Upload thumbnail stream to S3, return if unsuccessful
+            var thumbnailResponse = await UploadStreamToS3(fileName,
+                thumbnailImageStream, log, addThumbPath: thumbWidth.ToString() + "/"
+            );
+            consolidatedMsg += thumbnailResponse.Message;
+            if (!thumbnailResponse.Succeeded)
+                return new BadRequestObjectResult(consolidatedMsg);
+
+
+            // Log CDN urls of full-size and thumbnail if applicable
+            if (checkCDNForExistingImagesFirst)
+            {
+                string cdnDomain = Environment.GetEnvironmentVariable("CDN_DOMAIN");
+                consolidatedMsg += $"{cdnDomain}/{s3path}{thumbWidth}/{fileName}\n";
+                consolidatedMsg += $"{cdnDomain}/{s3path}{fileName}\n";
+            }
+
+            // Log S3 upload time
+            double timeElapsed = Math.Round((DateTime.Now - startTime).TotalSeconds, 2);
+            consolidatedMsg += $"\nS3 Upload Took {timeElapsed}s";
+
+
+            // Return final consolidated msg
+            return new OkObjectResult(consolidatedMsg);
+
         }
-
-
-        // Download from url, return if unsuccessful
-        var downloadResponse = await DownloadImageUrlToStream(source, log);
-        consolidatedMsg += downloadResponse.Message;
-        if (!downloadResponse.Succeeded)
-            return new BadRequestObjectResult(consolidatedMsg);
-
-
-        // Load stream into ImageMagick for conversion, return if unsuccessful
-        Stream thumbnailImageStream = new MemoryStream();
-        Stream fullSizeImageStream = new MemoryStream();
-        var imResponse = MakeImageTransparent(
-            downloadResponse.bytePayload,
-            fullSizeImageStream,
-            thumbnailImageStream,
-            log,
-            quality,
-            fuzz
-        );
-        consolidatedMsg += imResponse.Message;
-        if (!imResponse.Succeeded)
-            return new BadRequestObjectResult(consolidatedMsg);
-
-
-        // Upload full size image stream to S3, return if failed
-        consolidatedMsg += "S3 Upload of Full-Size and Thumbnail WebPs:\n" + "".PadRight(43, '-') + "\n";
-
-        var fullSizeResponse = await UploadStreamToS3(fileName, fullSizeImageStream, log);
-        consolidatedMsg += fullSizeResponse.Message;
-        if (!fullSizeResponse.Succeeded) return new BadRequestObjectResult(consolidatedMsg);
-
-
-        // Upload thumbnail stream to S3, return if unsuccessful
-        var thumbnailResponse = await UploadStreamToS3(fileName,
-            thumbnailImageStream, log, addThumbPath: thumbWidth.ToString() + "/"
-        );
-        consolidatedMsg += thumbnailResponse.Message;
-        if (!thumbnailResponse.Succeeded)
-            return new BadRequestObjectResult(consolidatedMsg);
-
-
-        // Log CDN urls of full-size and thumbnail if applicable
-        if (checkCDNForExistingImagesFirst)
+        catch (System.Exception e)
         {
-            string cdnDomain = Environment.GetEnvironmentVariable("CDN_DOMAIN");
-            consolidatedMsg += $"{cdnDomain}/{s3path}{thumbWidth}/{fileName}\n";
-            consolidatedMsg += $"{cdnDomain}/{s3path}{fileName}\n";
+            return new BadRequestObjectResult(consolidatedMsg + "\nError: " + e);
         }
-
-        // Log S3 upload time
-        double timeElapsed = Math.Round((DateTime.Now - startTime).TotalSeconds, 2);
-        consolidatedMsg += $"\nS3 Upload Took {timeElapsed}s";
-
-
-        // Return final consolidated msg
-        return new OkObjectResult(consolidatedMsg);
     }
 
     private static Response ValidateInputParameters(string destination, string source)
     {
-        // Auto-fix common typos
-        destination = destination.Replace("s3:/", "s3://").Replace("//", "/");
-
         // If query parameters are not valid, return error Message
         if (destination == null || source == null || !destination.Contains("s3://") || !source.Contains("http"))
         {
             return new Response(false,
-                "This function requires 'destination' and 'source' query parameters \nExample:\n\n" +
+                "This function requires 'destination=' and 'source=' query parameters \nExample:\n\n" +
                 "/ImageToS3?destination=s3://mybucket/path/new-file&source=https://domain.com/heavy-image.png\n\n" +
-                "Optional 'width' (default 200), 'quality' (default 75), 'fuzz' (default 3)" +
-                " parameters can also be set"
+                "Optional parameters:\n'width=' (default 200)\n'quality=' (default 75)\n'fuzz=' (default 3)\n" +
+                "'overwrite=' (default false)\n'cdnPath=' (default none)"
             );
         }
 
@@ -481,28 +479,25 @@ public static class ImageToS3Func
     }
 
     // Checks if file already exists on CDN
-    public static async Task<Response> ImageAlreadyExistsOnCDN(string fileName, ILogger log)
+    public static async Task<Response> ImageAlreadyExistsOnCDN(string fileName, string cdnPath, ILogger log)
     {
         try
         {
             string fileKey = s3path + fileName;
-            // Get CDN domain from env
-            string cdn = Environment.GetEnvironmentVariable("CDN_DOMAIN");
-            if (cdn == null) return new Response(true, "Error checking env variable 'CDN_DOMAIN' not found\n");
+            if (cdnPath.EndsWith("/")) cdnPath = cdnPath.Substring(0, cdnPath.Length - 1);
 
-            var response = await httpClient.GetAsync(cdn + "/" + fileKey);
+            var response = await httpClient.GetAsync(cdnPath + "/" + fileKey);
 
             // If existing image found on CDN, we can end the program
             if (response.StatusCode == HttpStatusCode.OK)
             {
-                string msg = $"{cdn}/{fileKey} already exists on CDN\n";
+                string msg = $"{cdnPath}/{fileKey} already exists on CDN\n";
                 log.LogInformation(msg);
                 return new Response(true, msg);
             }
             else if (response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.NotFound)
             {
-                string msg = $"{cdn}/{fileKey} not found on CDN\n";
-                msg += $"\n\nduring-exists  file: {fileName}\n";
+                string msg = $"{cdnPath}/{fileKey} not found on CDN\n";
                 return new Response(false, msg);
             }
             else
