@@ -32,8 +32,8 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to by other functions
-        string consolidatedMsg = "ImageToS3 v1.4.2 - powered by Azure Functions, AWS S3, and ImageMagick\n";
-        consolidatedMsg += "".PadRight(68, '-') + "\n\n";
+        string consolidatedMsg = "ImageToS3 v1.4.3 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        consolidatedMsg += "".PadRight(71, '-') + "\n\n";
 
         // Store start time for logging function duration
         startTime = DateTime.Now;

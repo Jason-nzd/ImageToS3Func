@@ -5,7 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="awSSDK.S3" Version="3.7.304.2" />
-    <PackageReference Include="Magick.NET-Q8-x64" Version="13.4.0" />
+    <PackageReference Include="magick.NET-Q8-AnyCPU" Version="13.4.0" />
     <PackageReference Include="Microsoft.NET.Sdk.Functions" Version="4.2.0" />
   </ItemGroup>
   <ItemGroup>
