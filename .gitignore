@@ -3,4 +3,6 @@
 /obj
 /Properties
 
+*.sln
+
 local.settings.json
