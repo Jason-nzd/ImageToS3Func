@@ -32,7 +32,7 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to by other functions
-        string consolidatedMsg = "ImageToS3 v1.4.1 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        string consolidatedMsg = "ImageToS3 v1.4.2 - powered by Azure Functions, AWS S3, and ImageMagick\n";
         consolidatedMsg += "".PadRight(68, '-') + "\n\n";
 
         // Store start time for logging function duration
@@ -102,6 +102,7 @@ public static class ImageToS3Func
             // Load stream into ImageMagick for conversion, return if unsuccessful
             Stream thumbnailImageStream = new MemoryStream();
             Stream fullSizeImageStream = new MemoryStream();
+
             var imResponse = MakeImageTransparent(
                 downloadResponse.bytePayload,
                 fullSizeImageStream,
@@ -321,15 +322,15 @@ public static class ImageToS3Func
                 image.Shave(1, 1);
 
                 // Trim excess whitespace
-                // image.Trim();
+                image.Trim();
 
                 // Output full image to WebP format
                 image.Quality = quality;
                 image.Format = MagickFormat.WebP;
                 image.Write(fullSizeImageStream);
 
-                // Scale down and output thumbnail image
-                image.Scale(thumbWidth, thumbWidth);
+                // Scale down and output thumbnail image to a fixed square
+                image.Resize(new MagickGeometry(thumbWidth, thumbWidth))
                 image.Write(thumbnailImageStream);
 
                 // Measure time elapsed
@@ -339,7 +340,7 @@ public static class ImageToS3Func
                 // If image conversion is successful, log Message
                 return new Response(
                     true,
-                    $"         Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
+                    $"          Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
                     $"ImageMagick Conversion Took: {timeElapsed}s\n" + "".PadRight(36, '-') + "\n" +
                     $"              New File Size: {printFileSize(fullSizeImageStream.Length)}\n" +
                     $"               WebP Quality: {quality}%\n" +
