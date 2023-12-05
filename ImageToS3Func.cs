@@ -31,8 +31,8 @@ public static class ImageToS3Func
     [HttpTrigger(AuthorizationLevel.Function, "get", Route = null)] HttpRequest req,
     ILogger log)
     {
-        // Build a consolidated message string, which will be added to with all other functions
-        string consolidatedMsg = "ImageToS3 v1.4.0 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        // Build a consolidated message string, which will be added to by other functions
+        string consolidatedMsg = "ImageToS3 v1.4.1 - powered by Azure Functions, AWS S3, and ImageMagick\n";
         consolidatedMsg += "".PadRight(68, '-') + "\n\n";
 
         // Store start time for logging function duration
@@ -339,13 +339,13 @@ public static class ImageToS3Func
                 // If image conversion is successful, log Message
                 return new Response(
                     true,
-                    $"    Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
-                    $"ImageMagick Conversion - Took {timeElapsed}s\n" + "".PadRight(36, '-') + "\n" +
-                    $"       New File Size: {printFileSize(fullSizeImageStream.Length)}\n" +
-                    $"        WebP Quality: {quality}%\n" +
-                    $"   Transparency Fuzz: {fuzz}%\n\n" +
-                    $"Thumbnail Dimensions: {thumbWidth} x {thumbWidth}\n" +
-                    $" Thumbnail File Size: {printFileSize(thumbnailImageStream.Length)}\n\n"
+                    $"         Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
+                    $"ImageMagick Conversion Took: {timeElapsed}s\n" + "".PadRight(36, '-') + "\n" +
+                    $"              New File Size: {printFileSize(fullSizeImageStream.Length)}\n" +
+                    $"               WebP Quality: {quality}%\n" +
+                    $"          Transparency Fuzz: {fuzz}%\n\n" +
+                    $"       Thumbnail Dimensions: {thumbWidth} x {thumbWidth}\n" +
+                    $"        Thumbnail File Size: {printFileSize(thumbnailImageStream.Length)}\n\n"
                 );
             }
         }
