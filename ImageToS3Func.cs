@@ -330,7 +330,12 @@ public static class ImageToS3Func
                 image.Write(fullSizeImageStream);
 
                 // Scale down and output thumbnail image to a fixed square
-                image.Resize(new MagickGeometry(thumbWidth, thumbWidth));
+                image.BackgroundColor = new MagickColor(0, 0, 0, 0);
+                MagickGeometry square = new MagickGeometry(thumbWidth, thumbWidth);
+                image.Resize(square);
+                image.Extent(square);
+
+                // Write to Stream
                 image.Write(thumbnailImageStream);
 
                 // Measure time elapsed
