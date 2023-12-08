@@ -20,9 +20,10 @@ public static class ImageToS3Func
     static readonly RegionEndpoint region = RegionEndpoint.APSoutheast2;
     static IAmazonS3 s3client;
     static string s3bucket = "", s3path = "";
-    static int thumbWidth, quality, fuzz;
+    static int thumbWidth, quality, fuzz, maximumDesiredHeight;
     static DateTime startTime;
     static HttpClient httpClient = new HttpClient();
+    static bool rejectGreyscale = true;
 
     [FunctionName("ImageToS3")]
     public static async Task<IActionResult> Run(
@@ -32,8 +33,8 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to by other functions
-        string consolidatedMsg = "ImageToS3 v1.4.4 - powered by Azure Functions, AWS S3, and ImageMagick\n";
-        consolidatedMsg += "".PadRight(71, '-') + "\n\n";
+        string consolidatedMsg = "ImageToS3 v1.5.2 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        consolidatedMsg += "".PadRight(70, '-') + "\n\n";
 
         // Store start time for logging function duration
         startTime = DateTime.Now;
@@ -46,6 +47,9 @@ public static class ImageToS3Func
         string overwrite = req.Query["overwrite"];
         bool forceOverwrite = (overwrite != null && overwrite == "true");
 
+        // Check for reject greyscale flag, which defaults to true
+        if (req.Query["rejectGreyscale"] == false) rejectGreyscale = false;
+
         // To prevent excess PUT requests, checks can be made for already existing image on the S3 Bucket,
         //  or if a CDN is in use, the CDN can be checked first to reduce S3 GET requests.
         string cdnPath = req.Query["cdnPath"];
@@ -54,14 +58,20 @@ public static class ImageToS3Func
         try
         {
             // Try parse integers from query parameters
-            // ParseIntWithRange() will return -1 if invalid, out of specified range, or missing
-            thumbWidth = ParseIntWithRange(req.Query["width"], min: 16, max: 512);
-            quality = ParseIntWithRange(req.Query["quality"], min: 5, max: 100);
-            fuzz = ParseIntWithRange(req.Query["fuzz"], min: 0, max: 100);
+            // If query params don't exist or are invalid, the default value will be used
+            thumbWidth = ParseIntWithRange(req.Query["width"], min: 16, max: 512, defaultValue: 200);
+            quality = ParseIntWithRange(req.Query["quality"], min: 5, max: 100, defaultValue: 70);
+            fuzz = ParseIntWithRange(req.Query["fuzz"], min: 0, max: 100, defaultValue: 3);
+            maximumDesiredHeight = ParseIntWithRange(
+                req.Query["maximumDesiredHeight"],
+                min: 16,
+                max: 16000,
+                defaultValue: 1024
+            );
 
 
-            // Validate input query parameters, return if unable to validate inputs
-            var inputResponse = ValidateInputParameters(destination, source);
+            // Validate url query parameters, return if unable to validate inputs
+            var inputResponse = ValidateURLParameters(destination, source);
             consolidatedMsg += inputResponse.Message;
             if (!inputResponse.Succeeded)
                 return new BadRequestObjectResult(consolidatedMsg);
@@ -103,6 +113,7 @@ public static class ImageToS3Func
             Stream thumbnailImageStream = new MemoryStream();
             Stream fullSizeImageStream = new MemoryStream();
 
+            // Process image streams into transparent and compressed formats
             var imResponse = MakeImageTransparent(
                 downloadResponse.bytePayload,
                 fullSizeImageStream,
@@ -156,16 +167,21 @@ public static class ImageToS3Func
         }
     }
 
-    private static Response ValidateInputParameters(string destination, string source)
+    private static Response ValidateURLParameters(string destination, string source)
     {
-        // If query parameters are not valid, return error Message
+        // If source or destination query parameters are not valid, return error Message
         if (destination == null || source == null || !destination.Contains("s3://") || !source.Contains("http"))
         {
             return new Response(false,
                 "This function requires 'destination=' and 'source=' query parameters \nExample:\n\n" +
                 "/ImageToS3?destination=s3://mybucket/path/new-file&source=https://domain.com/heavy-image.png\n\n" +
-                "Optional parameters:\n'width=' (default 200)\n'quality=' (default 75)\n'fuzz=' (default 3)\n" +
-                "'overwrite=' (default false)\n'cdnPath=' (default none)"
+                "Optional parameters:\n" +
+                "'width=' (default 200) (thumbnail width)\n" +
+                "'quality=' (default 70) (image compression quality 1-100)\n" +
+                "'fuzz=' (default 3) (transparency detection fuzz threshold 1-50)\n" +
+                "'overwrite=' (default false) (overwrites images that already exist)\n" +
+                "'cdnPath=' (default none) (checks CDN before S3 to see if image already exists)\n" +
+                "'rejectGreyscale=false' (default true) (rejects source images which are greyscale)\n"
             );
         }
 
@@ -189,11 +205,6 @@ public static class ImageToS3Func
 
         // Get filename from last index
         string fileName = destinationChunks[destinationChunks.Length - 1];
-
-        // Set integers to defaults if unable to be parsed
-        thumbWidth = thumbWidth > 0 ? thumbWidth : 200;
-        quality = quality > 0 ? quality : 75;
-        fuzz = fuzz > 0 ? fuzz : 3;
 
         // Build return msg
         string successMsg = $"      Source: {source}\n" +
@@ -345,7 +356,7 @@ public static class ImageToS3Func
                 // Resize to a maximum height if needed
                 int resizedWidth = 0;
                 int resizedHeight = 0;
-                const int maximumDesiredHeight = 1024;
+
                 if (image.Height > maximumDesiredHeight)
                 {
                     Console.WriteLine($"Image height of {image.Height} will be downsized to {maximumDesiredHeight}");
@@ -426,7 +437,7 @@ public static class ImageToS3Func
 
     // Parses a string of a number that should be within min - max range
     //  returns -1 if unsuccessful
-    private static int ParseIntWithRange(string numString, int min, int max)
+    private static int ParseIntWithRange(string numString, int min, int max, int defaultValue)
     {
         try
         {
@@ -437,7 +448,7 @@ public static class ImageToS3Func
         }
         catch (Exception)
         {
-            return -1;
+            return defaultValue;
         }
     }
 
