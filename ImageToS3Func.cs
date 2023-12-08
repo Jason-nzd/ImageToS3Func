@@ -313,6 +313,23 @@ public static class ImageToS3Func
                 int originalWidth = image.Width;
                 int originalHeight = image.Height;
 
+                // Check if the image is greyscale by comparing it to a desaturated copy
+                if (rejectGreyscale)
+                {
+                    MagickImage desaturatedCopy = new MagickImage(image);
+                    desaturatedCopy.Modulate(new Percentage(100), new Percentage(0));
+
+                    // Reject greyscale images which have an error amount < 0.001
+                    double comparisonErrorAmount = image.Compare(desaturatedCopy, ErrorMetric.RootMeanSquared);
+                    if (comparisonErrorAmount < 0.001)
+                    {
+                        return new Response(
+                            false,
+                            $"\nSource image rejected as greyscale with error amount: {comparisonErrorAmount}"
+                        );
+                    }
+                }
+
                 // Converts white pixels into transparent pixels with a default fuzz of 3
                 image.ColorFuzz = new Percentage(fuzz);
                 image.Alpha(AlphaOption.Set);
