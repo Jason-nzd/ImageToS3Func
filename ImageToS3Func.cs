@@ -32,7 +32,7 @@ public static class ImageToS3Func
     ILogger log)
     {
         // Build a consolidated message string, which will be added to by other functions
-        string consolidatedMsg = "ImageToS3 v1.4.3 - powered by Azure Functions, AWS S3, and ImageMagick\n";
+        string consolidatedMsg = "ImageToS3 v1.4.4 - powered by Azure Functions, AWS S3, and ImageMagick\n";
         consolidatedMsg += "".PadRight(71, '-') + "\n\n";
 
         // Store start time for logging function duration
@@ -55,7 +55,7 @@ public static class ImageToS3Func
         {
             // Try parse integers from query parameters
             // ParseIntWithRange() will return -1 if invalid, out of specified range, or missing
-            thumbWidth = ParseIntWithRange(req.Query["width"], min: 16, max: 4096);
+            thumbWidth = ParseIntWithRange(req.Query["width"], min: 16, max: 512);
             quality = ParseIntWithRange(req.Query["quality"], min: 5, max: 100);
             fuzz = ParseIntWithRange(req.Query["fuzz"], min: 0, max: 100);
 
@@ -324,6 +324,15 @@ public static class ImageToS3Func
                 // Trim excess whitespace
                 image.Trim();
 
+                // Resize to a maximum height if needed
+                const int maximumHeight = 1024;
+                if (maximumHeight > image.Height)
+                {
+                    int heightDifference = Math.Abs(maximumHeight - image.Height);
+                    float percentDifference = heightDifference / maximumHeight;
+                    image.Resize(new Percentage(100f - percentDifference));
+                }
+
                 // Output full image to WebP format
                 image.Quality = quality;
                 image.Format = MagickFormat.WebP;
@@ -333,7 +342,7 @@ public static class ImageToS3Func
                 image.BackgroundColor = new MagickColor(0, 0, 0, 0);
                 MagickGeometry square = new MagickGeometry(thumbWidth, thumbWidth);
                 image.Resize(square);
-                image.Extent(square);
+                image.Extent(square, Gravity.Center);
 
                 // Write to Stream
                 image.Write(thumbnailImageStream);
