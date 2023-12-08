@@ -326,12 +326,21 @@ public static class ImageToS3Func
                 image.Trim();
 
                 // Resize to a maximum height if needed
-                const int maximumHeight = 1024;
-                if (maximumHeight > image.Height)
+                int resizedWidth = 0;
+                int resizedHeight = 0;
+                const int maximumDesiredHeight = 1024;
+                if (image.Height > maximumDesiredHeight)
                 {
-                    int heightDifference = Math.Abs(maximumHeight - image.Height);
-                    float percentDifference = heightDifference / maximumHeight;
+                    Console.WriteLine($"Image height of {image.Height} will be downsized to {maximumDesiredHeight}");
+
+                    // Calculate the percentage to scale down to reach the desired maximum height
+                    int heightDifference = Math.Abs(maximumDesiredHeight - image.Height);
+                    float percentDifference = heightDifference / (float)image.Height * 100f;
+
+                    // Perform the resize and store the new dimensions for logging purposes
                     image.Resize(new Percentage(100f - percentDifference));
+                    resizedWidth = image.Width;
+                    resizedHeight = image.Height;
                 }
 
                 // Output full image to WebP format
