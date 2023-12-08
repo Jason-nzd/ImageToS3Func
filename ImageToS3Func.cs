@@ -150,7 +150,7 @@ public static class ImageToS3Func
             return new OkObjectResult(consolidatedMsg);
 
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             return new BadRequestObjectResult(consolidatedMsg + "\nError: " + e);
         }
@@ -251,7 +251,7 @@ public static class ImageToS3Func
                 downloadedBytes
             );
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             return new Response(
                 false,
@@ -276,7 +276,7 @@ public static class ImageToS3Func
             // If no exceptions have been thrown, we have successfully connected to S3
             return new Response(true);
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             if (e.Message.StartsWith("The specified bucket does not exist"))
             {
@@ -309,6 +309,7 @@ public static class ImageToS3Func
         {
             using (var image = new MagickImage(input))
             {
+                // Store original source image dimensions
                 int originalWidth = image.Width;
                 int originalHeight = image.Height;
 
@@ -354,17 +355,22 @@ public static class ImageToS3Func
                 // If image conversion is successful, log Message
                 return new Response(
                     true,
-                    $"          Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
-                    $"ImageMagick Conversion Took: {timeElapsed}s\n" + "".PadRight(36, '-') + "\n" +
-                    $"              New File Size: {printFileSize(fullSizeImageStream.Length)}\n" +
-                    $"               WebP Quality: {quality}%\n" +
-                    $"          Transparency Fuzz: {fuzz}%\n\n" +
-                    $"       Thumbnail Dimensions: {thumbWidth} x {thumbWidth}\n" +
-                    $"        Thumbnail File Size: {printFileSize(thumbnailImageStream.Length)}\n\n"
+                    $"    Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
+
+                    $"ImageMagick Conversion Took: {timeElapsed}s\n" + "".PadRight(35, '-') + "\n" +
+                    $"        New File Size: {printFileSize(fullSizeImageStream.Length)}\n" +
+                    $"         WebP Quality: {quality}%\n" +
+                    $"    Transparency Fuzz: {fuzz}%\n" +
+                    ((image.Height < originalHeight) ?
+                        $"       New Dimensions: {image.Width} x {image.Height}\n\n"
+                        : "\n\n") +
+
+                    $" Thumbnail Dimensions: {thumbWidth} x {thumbWidth}\n" +
+                    $"  Thumbnail File Size: {printFileSize(thumbnailImageStream.Length)}\n\n"
                 );
             }
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             log.LogError(e.Message);
             return new Response(false, "\nImage unable to be processed by ImageMagick - Check it is a valid image url");
@@ -384,7 +390,7 @@ public static class ImageToS3Func
             }
             return lastSection;
         }
-        catch (System.Exception)
+        catch (Exception)
         {
             return url;
         }
@@ -401,7 +407,7 @@ public static class ImageToS3Func
                 throw new Exception();
             return num;
         }
-        catch (System.Exception)
+        catch (Exception)
         {
             return -1;
         }
@@ -446,7 +452,7 @@ public static class ImageToS3Func
             log.LogError("S3 Exception: " + e.Message);
             return new Response(false, e.Message);
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             log.LogError(e.Message);
             return new Response(false, e.Message);
@@ -485,7 +491,7 @@ public static class ImageToS3Func
                 return new Response(true, e.ToString());
             }
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             // Return true which will end the program and display the error
             log.LogError(e.Message);
@@ -522,7 +528,7 @@ public static class ImageToS3Func
                 return new Response(true, msg);
             }
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             // Return true which will end the program and display the error
             log.LogError(e.Message);
