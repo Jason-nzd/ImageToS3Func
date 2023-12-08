@@ -366,13 +366,15 @@ public static class ImageToS3Func
                     true,
                     $"    Source Dimensions: {originalWidth} x {originalHeight}\n\n" +
 
-                    $"ImageMagick Conversion Took: {timeElapsed}s\n" + "".PadRight(35, '-') + "\n" +
+                    $"ImageMagick Conversion Took: {timeElapsed}s\n" + "".PadRight(34, '-') + "\n" +
                     $"        New File Size: {printFileSize(fullSizeImageStream.Length)}\n" +
                     $"         WebP Quality: {quality}%\n" +
                     $"    Transparency Fuzz: {fuzz}%\n" +
-                    ((image.Height < originalHeight) ?
-                        $"       New Dimensions: {image.Width} x {image.Height}\n\n"
-                        : "\n\n") +
+
+                    // Conditionally log the resized dimensions only if a resize was performed
+                    ((resizedWidth != 0) ?
+                        $"   Resized Dimensions: {resizedWidth} x {resizedHeight}\n\n"
+                        : "\n") +
 
                     $" Thumbnail Dimensions: {thumbWidth} x {thumbWidth}\n" +
                     $"  Thumbnail File Size: {printFileSize(thumbnailImageStream.Length)}\n\n"
